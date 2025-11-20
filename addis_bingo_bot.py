@@ -1,6 +1,5 @@
-# Addis (አዲስ) Bingo - V5: Complete Game Engine (Test Mode)
-# Features: Lobby, Auto-Deduct, Bingo Cards, Number Calling, Win Check
-# NOTE: MIN_PLAYERS is set to 1 for testing.
+# Addis (አዲስ) Bingo - V5.1: Final Configuration for Telebirr and Username
+# NOTE: MIN_PLAYERS is still set to 1 for testing.
 
 import os
 import logging
@@ -17,19 +16,19 @@ from firebase_admin import credentials, firestore
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 V2_SECRETS = os.environ.get('V2_SECRETS')
+# Admin's username will be read from the Render environment
+ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME') 
 
 # --- Logging ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Global Game State (In-Memory) ---
-LOBBY = set() # Stores user_ids waiting to play
-ACTIVE_GAMES = {} # Stores game data
+LOBBY = set()
+ACTIVE_GAMES = {}
 GAME_COST = 10
-PRIZE_AMOUNT = 40 # 80% of 50
-
-# --- TEST SETTING: START WITH 1 PLAYER ---
-MIN_PLAYERS = 5 
+PRIZE_AMOUNT = 40 
+MIN_PLAYERS = 1 # Set to 1 for testing
 
 # --- Database Setup ---
 DB_STATUS = "Unknown"
@@ -50,7 +49,7 @@ try:
 except Exception as e:
     DB_STATUS = f"Error: {e}"
 
-# --- Database Helpers ---
+# --- Database Helpers (Unchanged) ---
 USERS_COLLECTION = 'addis_bingo_users'
 
 def get_user_data(user_id: int) -> dict:
@@ -77,10 +76,9 @@ def update_balance(user_id: int, amount: float):
         'balance': firestore.Increment(amount)
     })
 
-# --- Bingo Logic ---
+# --- Bingo Logic (Unchanged) ---
 
 def generate_card():
-    """Generates a 5x5 Bingo card columns."""
     card = {
         'B': random.sample(range(1, 16), 5),
         'I': random.sample(range(16, 31), 5),
@@ -91,7 +89,6 @@ def generate_card():
     return card
 
 def format_card_text(card):
-    """Creates a text-based Bingo board string."""
     msg = "🎱 **B  I  N  G  O** 🎱\n"
     for i in range(5):
         row = [card['B'][i], card['I'][i], card['N'][i], card['G'][i], card['O'][i]]
@@ -99,29 +96,22 @@ def format_card_text(card):
     return msg
 
 def check_win(card, called_numbers):
-    """Checks if a card has a winning line."""
     called_set = set(called_numbers)
-    
-    # Convert card to grid 5x5
     grid = []
     for i in range(5):
         grid.append([card['B'][i], card['I'][i], card['N'][i], card['G'][i], card['O'][i]])
 
-    # Check Rows & Cols
     for i in range(5):
-        if all(grid[i][c] in called_set for c in range(5)): return True # Row
-        if all(grid[r][i] in called_set for r in range(5)): return True # Col
+        if all(grid[i][c] in called_set for c in range(5)): return True
+        if all(grid[r][i] in called_set for r in range(5)): return True
 
-    # Check Diagonals
     if all(grid[i][i] in called_set for i in range(5)): return True
     if all(grid[i][4-i] in called_set for i in range(5)): return True
-
     return False
 
-# --- Game Loop (Async) ---
+# --- Game Loop (Unchanged) ---
 
 async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
-    """The main heartbeat of the game. Calls numbers every 4 seconds."""
     cards = {pid: generate_card() for pid in players}
     called = []
     available_numbers = list(range(1, 76))
@@ -134,7 +124,6 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
         'status': 'running'
     }
 
-    # 1. Send Cards to Players
     for pid in players:
         card_txt = format_card_text(cards[pid])
         try:
@@ -144,15 +133,13 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
 
     await asyncio.sleep(3)
 
-    # 2. Call Numbers Loop
     for num in available_numbers:
         if game_id not in ACTIVE_GAMES or ACTIVE_GAMES[game_id]['status'] != 'running':
-            break # Game ended
+            break
 
         called.append(num)
         ACTIVE_GAMES[game_id]['called'] = called
         
-        # Broadcast Number
         msg = f"📣 ቁጥር (Number): **{num}**"
         for pid in players:
             try:
@@ -160,7 +147,6 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
             except:
                 pass
         
-        # Wait before next number
         await asyncio.sleep(4) 
 
 # --- Handlers ---
@@ -176,7 +162,31 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(f"💰 ቀሪ ሂሳብ (Balance): {data.get('balance', 0.0)} Br")
 
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(f"Deposit to 0927922721 (Telebirr). Send receipt to {ADMIN_USER_ID}.")
+    # Telebirr number is hardcoded here, based on your request
+    telebirr_number = "0927922721"
+    
+    # Use the username variable if available, otherwise fall back to ID
+    contact_info = ADMIN_USERNAME if ADMIN_USERNAME else str(ADMIN_USER_ID)
+    
+    # If a username is available, create a clickable link
+    if ADMIN_USERNAME and ADMIN_USERNAME.startswith('@'):
+        link_name = f"Admin ({ADMIN_USERNAME})"
+        # Markdown for a clickable link to the user
+        link_message = f"[Send Receipt to {link_name}](https://t.me/{ADMIN_USERNAME.lstrip('@')})"
+    else:
+        # Fallback to plain text if no username is set
+        link_message = f"Send receipt to Admin: {contact_info}"
+
+    message = (
+        f"**🏦 የገንዘብ ማስገቢያ (Deposit Instructions) 🏦**\n\n"
+        f"1. Telebirr ቁጥር: **{telebirr_number}** ይጠቀሙ።\n"
+        f"2. የላኩበትን ደረሰኝ (Screenshot) ወዲያውኑ ለኛ ይላኩ:\n"
+        f"{link_message}\n\n"
+        f"_ገንዘብዎ በአንድ ደቂቃ ውስጥ ወደ ሂሳብዎ ይገባል!_"
+    )
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
 
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("ገንዘብ ለማውጣት ለአድሚን መልእክት ይላኩ።")
@@ -184,41 +194,33 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     
-    # 1. Check Balance
     data = get_user_data(user_id)
     if data.get('balance', 0) < GAME_COST:
         await update.message.reply_text(f"⛔ በቂ ሂሳብ የለዎትም (Not enough balance).\nያስፈልጋል: {GAME_COST} Br\nአለዎት: {data.get('balance', 0)} Br")
         return
 
-    # 2. Check if already in lobby
     if user_id in LOBBY:
         await update.message.reply_text(f"⏳ ተራ ይጠብቁ (Already waiting). {len(LOBBY)}/{MIN_PLAYERS} players.")
         return
 
-    # 3. Deduct Money & Join
     update_balance(user_id, -GAME_COST)
     LOBBY.add(user_id)
     
     await update.message.reply_text(f"✅ ተመዝግበዋል! (Joined). {len(LOBBY)}/{MIN_PLAYERS} players.")
 
-    # 4. Check Start Condition
     if len(LOBBY) >= MIN_PLAYERS:
         game_players = list(LOBBY)
         LOBBY.clear()
         game_id = f"G{random.randint(1000,9999)}"
         
-        # Notify Start
         for pid in game_players:
             await context.bot.send_message(pid, "🚀 ጨዋታው ሊጀምር ነው! (Game starting...)")
         
-        # Start Game Loop Task
         asyncio.create_task(run_game_loop(context, game_id, game_players))
 
 async def bingo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """User claims Bingo!"""
     user_id = update.effective_user.id
     
-    # Find user's active game
     found_game_id = None
     for gid, gdata in ACTIVE_GAMES.items():
         if user_id in gdata['players'] and gdata['status'] == 'running':
@@ -233,19 +235,16 @@ async def bingo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     card = game_data['cards'][user_id]
     called = game_data['called']
 
-    # Validate Win
     if check_win(card, called):
-        # WINNER!
-        game_data['status'] = 'finished' # Stop the loop
+        game_data['status'] = 'finished'
         update_balance(user_id, PRIZE_AMOUNT)
         
         win_msg = f"🎉 BINGO!!! 🎉\n\nአሸናፊ (Winner): {update.effective_user.first_name}\nPrize: {PRIZE_AMOUNT} Br Added!"
         for pid in game_data['players']:
             await context.bot.send_message(pid, win_msg)
         
-        del ACTIVE_GAMES[found_game_id] # Cleanup
+        del ACTIVE_GAMES[found_game_id]
     else:
-        # False Alarm
         await update.message.reply_text("❌ ውሸት! (Not a winner yet). Keep playing.")
 
 # --- Admin ---
