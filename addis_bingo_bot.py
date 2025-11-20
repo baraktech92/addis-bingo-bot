@@ -1,5 +1,6 @@
-# Addis (አዲስ) Bingo - V8.1: Adds /instructions command and includes rules on /start.
-# This version features the Dynamic Card with automatic Green highlights and Card Selection.
+# Addis (አዲስ) Bingo - V9.0: Implements Dynamic Game Board Flow
+# The game now uses a single, constantly edited message to display all called numbers, 
+# ensuring the card stays visible and improving tracking for the player.
 
 import os
 import logging
@@ -127,6 +128,37 @@ def get_card_position(card, value):
                 continue
     return None, None
 
+def format_called_numbers(called_numbers):
+    # Formats the list of called numbers into columns for the history board
+    if not called_numbers:
+        return "--- ቁጥሮች ገና አልተጠሩም (No numbers called yet) ---"
+    
+    output = []
+    
+    # Group numbers by column letter
+    grouped = {col: [] for col in COLUMNS}
+    for num in called_numbers:
+        col_letter = next(col for col, (start, end) in [('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), ('G', (46, 60)), ('O', (61, 75))] if start <= num <= end)
+        grouped[col_letter].append(str(num))
+
+    # Build columns, padding with spaces for alignment
+    max_len = max(len(v) for v in grouped.values()) if grouped.values() else 0
+    
+    board = [" ".join(COLUMNS)] # Header
+    
+    # Pad shorter columns with empty strings for consistent display
+    for i in range(max_len):
+        row = []
+        for col in COLUMNS:
+            if i < len(grouped[col]):
+                row.append(grouped[col][i].ljust(2)) # Pad each number to 2 chars
+            else:
+                row.append("  ")
+        board.append(" ".join(row))
+
+    return "\n".join(board)
+
+
 async def refresh_all_player_cards(context: ContextTypes.DEFAULT_TYPE, game_id, players):
     game_data = ACTIVE_GAMES[game_id]
     
@@ -143,9 +175,10 @@ async def refresh_all_player_cards(context: ContextTypes.DEFAULT_TYPE, game_id, 
                 reply_markup=new_keyboard
             )
         except Exception as e:
-            logger.error(f"Error refreshing card for {pid}: {e}")
+            # This is common if the player's message is too old or was deleted
+            logger.debug(f"Error refreshing card for {pid}: {e}")
 
-
+# Note: The card is slightly compacted for better mobile view
 def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selection=True):
     keyboard = []
     header = [InlineKeyboardButton(col, callback_data=f"ignore_header") for col in COLUMNS]
@@ -160,23 +193,25 @@ def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selectio
             is_called = card['called'].get(pos, False)
 
             if value == "FREE":
-                label = f"{EMOJI_FREE} {value}"
+                label = f"{EMOJI_FREE}"
                 callback_data = f"ignore_free"
             elif is_marked:
-                label = f"{EMOJI_MARKED} {value}" # Already marked by player
-                callback_data = f"MARK|{game_id}|{msg_id}|{c}|{r}" # Allow unmarking
+                label = f"{EMOJI_MARKED}{value}" 
+                callback_data = f"MARK|{game_id}|{msg_id}|{c}|{r}" 
             elif is_called:
-                label = f"{EMOJI_CALLED} {value}" # Called but not marked by player
-                callback_data = f"MARK|{game_id}|{msg_id}|{c}|{r}" # Allow marking
+                label = f"{EMOJI_CALLED}{value}" 
+                callback_data = f"MARK|{game_id}|{msg_id}|{c}|{r}" 
             else:
-                label = f"{EMOJI_UNMARKED} {value}" # Not called yet
-                callback_data = f"ignore_not_called" # Cannot be marked
+                label = f"{EMOJI_UNMARKED}{value}" 
+                callback_data = f"ignore_not_called" 
             
-            # If selecting a card, all buttons are ignored (except the select button)
+            # Use smaller numbers for selection display
+            btn_label = str(value) if is_selection else label 
+
             if is_selection:
-                row.append(InlineKeyboardButton(str(value), callback_data=f"ignore_select_card_num"))
+                row.append(InlineKeyboardButton(btn_label, callback_data=f"ignore_select_card_num"))
             else:
-                row.append(InlineKeyboardButton(label, callback_data=callback_data))
+                row.append(InlineKeyboardButton(btn_label, callback_data=callback_data))
                 
         keyboard.append(row)
     
@@ -216,6 +251,15 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
     random.shuffle(available_numbers)
     
     ACTIVE_GAMES[game_id]['status'] = 'running'
+    game_data = ACTIVE_GAMES[game_id]
+    
+    # 1. Send the initial Called Numbers Board (for editing)
+    board_message_ids = {}
+    board_msg_text = "**🎰 የተጠሩ ቁጥሮች (Called Numbers Board) 🎰**\n\n_አረንጓዴው ቁጥር ሲመጣ በካርድዎ ላይ ይጫኑ!_"
+    for pid in players:
+        msg = await context.bot.send_message(pid, board_msg_text, parse_mode='Markdown')
+        board_message_ids[pid] = msg.message_id
+    game_data['board_messages'] = board_message_ids
 
     await asyncio.sleep(2)
 
@@ -224,11 +268,11 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
             break
 
         called.append(num)
-        ACTIVE_GAMES[game_id]['called'] = called
+        game_data['called'] = called
         
-        # 1. Update all cards with the new 'called' number for the green highlight
+        # 2. Update all cards with the new 'called' number for the green highlight
         for pid in players:
-            card = ACTIVE_GAMES[game_id]['cards'][pid]
+            card = game_data['cards'][pid]
             c, r = get_card_position(card, num)
             if c is not None and r is not None:
                 card['called'][(c, r)] = True
@@ -236,15 +280,31 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
         # Refresh all player cards to show the green highlight
         await refresh_all_player_cards(context, game_id, players)
 
-        # 2. Send the number call message
+        # 3. Update the single Calling Board message (NEW LOGIC)
         col_letter = next(col for col, (start, end) in [('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), ('G', (46, 60)), ('O', (61, 75))] if start <= num <= end)
-        msg = f"📣 ቁጥር (Number): **{col_letter}-{num}**\n\n_If you have this number, please tap the green button on your card now!_"
+        
+        # Format the history board
+        history_board = format_called_numbers(called[:-1]) # All numbers except the current one
+        
+        # The Current Call (displayed prominently at the bottom)
+        current_call = f"\n\n**📣 አሁን የተጠራ (CURRENT CALL): {col_letter}-{num}**"
+        
+        new_board_text = (
+            f"**🎰 የተጠሩ ቁጥሮች (Called Numbers Board) 🎰**\n"
+            f"```\n{history_board}\n```"
+            f"{current_call}"
+        )
         
         for pid in players:
             try:
-                await context.bot.send_message(pid, msg, parse_mode='Markdown')
+                await context.bot.edit_message_text(
+                    chat_id=pid,
+                    message_id=game_data['board_messages'][pid],
+                    text=new_board_text, 
+                    parse_mode='Markdown'
+                )
             except Exception as e:
-                 logger.error(f"Error sending number call to {pid}: {e}")
+                 logger.debug(f"Error editing board message for {pid}: {e}")
         
         await asyncio.sleep(8) 
     
@@ -267,7 +327,8 @@ async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYP
         "**🕹️ እንዴት እንጫወታለን? (How to Play) 🕹️**\n"
         "1. **/play** ይጫኑ እና 10 Br ይከፍላሉ።\n"
         "2. **3 የተለያዩ ካርዶች** ቀርበውልዎታል፤ የመረጡትን **'Select This'** የሚለውን ይጫኑ።\n"
-        "3. ቁጥሮች መጥራት ሲጀምሩ:\n"
+        "3. **የተጠሩ ቁጥሮች ቦርድ (Called Numbers Board):**\n"
+        "   - ይህ ቦርድ ከካርድዎ በላይ ይታያል እና ያለማቋረጥ ይዘመናል።\n"
         "   - **🟢 አረንጓዴ ቁጥር (Green Button):** ይህ ቁጥር ተጠርቷል ማለት ነው።\n"
         "   - **✅ ተጭነው ምልክት ያድርጉ (Tap to Mark):** ቁጥሩን በካርድዎ ላይ ምልክት ለማድረግ አረንጓዴውን ቁጥር ይጫኑ። ወደ **✅** ይቀየራል።\n"
         "4. **ቢንጎ (BINGO):** 5 ምልክት የተደረገባቸው ቁጥሮች (✅) በአንድ ቀጥተኛ መስመር (አግድም፣ ቁመታዊ፣ ወይም ዲያጎናል) ሲገጥሙ:\n"
@@ -275,20 +336,27 @@ async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYP
         
         "**እድለኛ ይሁኑ! (Good Luck!)**"
     )
-    await update.message.reply_text(message, parse_mode='Markdown')
+    # Use reply_markdown for instructions if it's not a /start command
+    if update.message:
+        await update.message.reply_text(message, parse_mode='Markdown')
+    else:
+        return message
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     create_or_update_user(user_id, update.effective_user.username, update.effective_user.first_name)
     
     await update.message.reply_text(
-        f"**👋 እንኳን ወደ አዲስ ቢንጎ በደህና መጡ!**\nSystem: {DB_STATUS}\n\n"
+        f"**👋 እንኳን ወደ አዲስ ቢንጎ በደህና መጡ!**\n\n"
         f"ለመጫወት /play ይጫኑ (Cost: {GAME_COST} Birr).\n\n"
         f"**👉 እባክዎ ከመጀመርዎ በፊት ህጎችን ያንብቡ:**"
     , parse_mode='Markdown')
     
     # Display the full instructions immediately after the welcome message
-    await instructions_command(update, context)
+    instructions = await instructions_command(update, context) # Get the message text
+    if instructions:
+        await update.message.reply_text(instructions, parse_mode='Markdown')
+
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -311,8 +379,10 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     if ADMIN_USERNAME and ADMIN_USERNAME.startswith('@'):
         link_name = f"Admin ({ADMIN_USERNAME})"
+        # Use t.me link for clickable username
         link_message = f"[Send Receipt to {link_name}](https://t.me/{ADMIN_USERNAME.lstrip('@')})"
     else:
+        # Fallback to plain text if username is not configured
         link_message = f"Send receipt to Admin: {contact_info}"
 
     message = (
@@ -339,27 +409,31 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"⛔ በቂ ሂሳብ የለዎትም (Not enough balance).\nያስፈልጋል: {GAME_COST} Br\nአለዎት: {data.get('balance', 0)} Br")
         return
 
+    # Check if the player is already in lobby or game
     if user_id in LOBBY or any(user_id in g['players'] for g in ACTIVE_GAMES.values()):
         await update.message.reply_text("⏳ ተራ ይጠብቁ (Already waiting or in a game).")
         return
 
+    # Deduct cost immediately
     update_balance(user_id, -GAME_COST)
     
     card_options = [generate_card() for i in range(3)]
     card_message_ids = []
 
+    await update.message.reply_text(f"✅ {GAME_COST} Br ተቀንሷል። (Deducted {GAME_COST} Br).\n\n**እባክዎ ከታች ካሉት 3 ካርዶች አንዱን ይምረጡ።**")
+
     for i, card in enumerate(card_options):
-        # Build initial selection keyboard without emojis/dynamic state
+        # Build initial selection keyboard
         keyboard = build_card_keyboard(card, i, is_selection=True)
         
         # Format the card numbers clearly for selection
         card_layout_text = ""
         for r in range(5):
-            row_numbers = [str(get_card_value(card, c, r)) for c in range(5)]
+            row_numbers = [str(get_card_value(card, c, r)).center(3) for c in range(5)]
             card_layout_text += " ".join(row_numbers) + "\n"
         
         message_text = (
-            f"🃏 **Card Option {i+1}** 🃏\n\n"
+            f"🃏 **Card Option {i+1}** 🃏\n"
             f"```\n{COLUMNS[0]}  {COLUMNS[1]}  {COLUMNS[2]}  {COLUMNS[3]}  {COLUMNS[4]}\n{card_layout_text}```\n"
             f"_ይህን ካርድ ከመምረጥዎ በፊት ቁጥሮቹን በጥንቃቄ ይመልከቱ።_"
         )
@@ -372,8 +446,6 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         'message_ids': card_message_ids,
         'status': 'selecting_card'
     }
-    
-    await context.bot.send_message(user_id, f"✅ {GAME_COST} Br ተቀንሷል። (Deducted {GAME_COST} Br).\n\n**እባክዎ ከላይ ካሉት 3 ካርዶች አንዱን ይምረጡ።**")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -394,26 +466,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         selected_card = lobby_data['cards'][card_index]
         all_message_ids = lobby_data['message_ids']
         
-        # 1. Clean up the other 2 card options
+        # 1. Clean up the other 2 card options and remove selection buttons
         for msg_id in all_message_ids:
             try:
-                # Edit the selected card's message to become the FINAL game card
-                if msg_id == query.message.message_id:
+                if msg_id != query.message.message_id:
+                    # Delete unselected cards
+                    await context.bot.delete_message(chat_id=user_id, message_id=msg_id)
+                else:
+                    # Edit the selected card's message to just show confirmation
                     await context.bot.edit_message_text(
                         chat_id=user_id,
                         message_id=msg_id,
                         text=f"✅ Card Selected! ጨዋታው ሊጀምር ነው! (Game starting...)\n\n_Tap the numbers on the card below to mark them._",
                         reply_markup=None 
                     )
-                else:
-                    await context.bot.delete_message(chat_id=user_id, message_id=msg_id)
             except Exception as e:
-                logger.error(f"Error cleaning up card messages: {e}")
+                logger.debug(f"Error cleaning up card messages: {e}")
 
         # 2. Start the Game Setup
         game_id = f"G{random.randint(1000,9999)}"
         
-        # Send the final interactive card for the game
+        # Send the final interactive card for the game (This will be the player's primary tracking tool)
         final_keyboard = build_card_keyboard(selected_card, card_index, game_id, query.message.message_id, is_selection=False)
 
         final_msg = await context.bot.send_message(
@@ -423,19 +496,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode='Markdown'
         )
         
-        # Remove the previous confirmation message, if possible
-        try: await context.bot.delete_message(chat_id=user_id, message_id=query.message.message_id)
-        except: pass
-
+        # Link the final interactive card message ID to the game state
         ACTIVE_GAMES[game_id] = {
             'players': [user_id], 
             'cards': {user_id: selected_card}, 
             'called': [], 
             'status': 'starting', 
-            'card_messages': {user_id: final_msg.message_id}
+            'card_messages': {user_id: final_msg.message_id},
+            'board_messages': {} # Will be populated in run_game_loop
         }
         
-        # 3. Start the game loop (for testing, MIN_PLAYERS=1 makes it start immediately)
+        # 3. Start the game loop 
         asyncio.create_task(run_game_loop(context, game_id, [user_id]))
         await query.answer("Card selected! Get ready to play!")
         return
@@ -486,21 +557,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         # 1. Check for Win
         if check_win(card):
+            # Stop the game loop
             game_data['status'] = 'finished'
             update_balance(user_id, PRIZE_AMOUNT)
             
             winner_name = query.from_user.first_name
             win_msg = f"🎉 BINGO!!! 🎉\n\nአሸናፊ (Winner): **{winner_name}**\n**Prize: {PRIZE_AMOUNT} Br Added!**"
             
-            # 2. Notify all players and remove game
+            # 2. Notify all players
             for pid in game_data['players']:
+                # Edit the board message to show final status
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=pid,
+                        message_id=game_data['board_messages'][pid],
+                        text=f"**🎉 WINNER: {winner_name} 🎉**\n\n**The Game has ended!**",
+                        reply_markup=None,
+                        parse_mode='Markdown'
+                    )
+                except: pass
+
+                # Send final notification
                 await context.bot.send_message(pid, win_msg, parse_mode='Markdown')
             
             # 3. Final cleanup of the winner's card
             try:
-                 await context.bot.edit_message_text(
-                    chat_id=user_id,
-                    message_id=msg_id,
+                 await query.edit_message_text(
                     text=f"**🎉 WINNER! Game Over. 🎉**\nPrize: {PRIZE_AMOUNT} Br",
                     reply_markup=None,
                     parse_mode='Markdown'
@@ -514,6 +596,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # --- Admin ---
 async def approve_deposit_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Requires admin to use this command
     if ADMIN_USER_ID is None or update.effective_user.id != ADMIN_USER_ID: return
     try:
         tid = int(context.args[0])
