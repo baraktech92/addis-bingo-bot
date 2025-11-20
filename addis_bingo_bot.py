@@ -1,5 +1,5 @@
-# Addis (አዲስ) Bingo - V5.3: Combined /balance and /id_me into one command.
-# This is the final working version for real-money gameplay.
+# Addis (አዲስ) Bingo - V5.4: User ID is now displayed directly in the /deposit message.
+# This streamlines the deposit process for the user.
 # NOTE: MIN_PLAYERS is still set to 1 for testing.
 
 import os
@@ -157,23 +157,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(f"እንኳን ወደ አዲስ ቢንጎ በደህና መጡ!\nSystem: {DB_STATUS}\n\nለመጫወት /play ይጫኑ (Cost: {GAME_COST} Birr).")
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # --- COMBINED BALANCE & ID LOGIC ---
+    # --- SIMPLIFIED BALANCE LOGIC (Only shows balance) ---
     user_id = update.effective_user.id
     data = get_user_data(user_id)
     balance = data.get('balance', 0.0)
     
     message = (
-        f"**👤 የመለያ መረጃ (Account Info) 👤**\n\n"
-        f"💰 ቀሪ ሂሳብ (Balance): **{balance} Br**\n\n"
-        f"💳 የእርስዎ መለያ ቁጥር (Telegram ID):\n"
-        f"**{user_id}**\n\n"
-        f"_ይህ ቁጥር ገንዘብ ሲያስገቡ (Deposit) ማረጋገጫ (Receipt) ለማድረግ **ያስፈልጋል**።_"
+        f"**💰 ቀሪ ሂሳብ (Balance) 💰**\n\n"
+        f"ሂሳብዎ: **{balance} Br**\n\n"
+        f"_ገንዘብ ለማስገባት /deposit ይጫኑ።_"
     )
     
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Telebirr number is hardcoded as per your request
+    user_id = update.effective_user.id
     telebirr_number = "0927922721"
     
     contact_info = ADMIN_USERNAME if ADMIN_USERNAME else str(ADMIN_USER_ID)
@@ -185,13 +183,13 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         link_message = f"Send receipt to Admin: {contact_info}"
 
-    # UPDATED MESSAGE INSTRUCTIONS (Now points to /balance for ID)
+    # NEW MESSAGE: Includes the user's ID immediately
     message = (
         f"**🏦 የገንዘብ ማስገቢያ (Deposit Instructions) 🏦**\n\n"
         f"1. Telebirr ቁጥር: **{telebirr_number}** ይጠቀሙ።\n"
-        f"2. የላኩበትን ደረሰኝ (Screenshot) እና **የእርስዎ Telegram ID** ቁጥርዎን ይላኩ።\n"
-        f"   - (ID ቁጥር ለማግኘት: /balance ይጫኑ)\n" 
-        f"3. ደረሰኝ እና ID ቁጥርዎን ወዲያውኑ ለኛ ይላኩ:\n"
+        f"2. የእርስዎ መለያ ቁጥር (Telegram ID):\n"
+        f"   **{user_id}**\n\n" # Displays the user's ID here!
+        f"3. የላኩበትን ደረሰኝ (Screenshot) እና **ID ቁጥርዎን** ወዲያውኑ ለኛ ይላኩ:\n"
         f"{link_message}\n\n"
         f"_ገንዘብዎ በአንድ ደቂቃ ውስጥ ወደ ሂሳብዎ ይገባል!_"
     )
