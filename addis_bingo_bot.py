@@ -1,4 +1,5 @@
-# Addis (አዲስ) Bingo - V5.1: Final Configuration for Telebirr and Username
+# Addis (አዲስ) Bingo - V5.3: Combined /balance and /id_me into one command.
+# This is the final working version for real-money gameplay.
 # NOTE: MIN_PLAYERS is still set to 1 for testing.
 
 import os
@@ -16,7 +17,7 @@ from firebase_admin import credentials, firestore
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 V2_SECRETS = os.environ.get('V2_SECRETS')
-# Admin's username will be read from the Render environment
+# Reads the username from the Render environment (e.g., @Addiscoders)
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME') 
 
 # --- Logging ---
@@ -28,9 +29,9 @@ LOBBY = set()
 ACTIVE_GAMES = {}
 GAME_COST = 10
 PRIZE_AMOUNT = 40 
-MIN_PLAYERS = 1 # Set to 1 for testing
+MIN_PLAYERS = 1 # *** REMEMBER TO CHANGE THIS TO 5 BEFORE GOING LIVE! ***
 
-# --- Database Setup ---
+# --- Database Setup (Unchanged) ---
 DB_STATUS = "Unknown"
 ADMIN_USER_ID = None
 db = None
@@ -77,7 +78,6 @@ def update_balance(user_id: int, amount: float):
     })
 
 # --- Bingo Logic (Unchanged) ---
-
 def generate_card():
     card = {
         'B': random.sample(range(1, 16), 5),
@@ -110,7 +110,6 @@ def check_win(card, called_numbers):
     return False
 
 # --- Game Loop (Unchanged) ---
-
 async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
     cards = {pid: generate_card() for pid in players}
     called = []
@@ -124,6 +123,7 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
         'status': 'running'
     }
 
+    # Only one player message since MIN_PLAYERS = 1
     for pid in players:
         card_txt = format_card_text(cards[pid])
         try:
@@ -157,30 +157,41 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(f"እንኳን ወደ አዲስ ቢንጎ በደህና መጡ!\nSystem: {DB_STATUS}\n\nለመጫወት /play ይጫኑ (Cost: {GAME_COST} Birr).")
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # --- COMBINED BALANCE & ID LOGIC ---
     user_id = update.effective_user.id
     data = get_user_data(user_id)
-    await update.message.reply_text(f"💰 ቀሪ ሂሳብ (Balance): {data.get('balance', 0.0)} Br")
+    balance = data.get('balance', 0.0)
+    
+    message = (
+        f"**👤 የመለያ መረጃ (Account Info) 👤**\n\n"
+        f"💰 ቀሪ ሂሳብ (Balance): **{balance} Br**\n\n"
+        f"💳 የእርስዎ መለያ ቁጥር (Telegram ID):\n"
+        f"**{user_id}**\n\n"
+        f"_ይህ ቁጥር ገንዘብ ሲያስገቡ (Deposit) ማረጋገጫ (Receipt) ለማድረግ **ያስፈልጋል**።_"
+    )
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Telebirr number is hardcoded here, based on your request
+    # Telebirr number is hardcoded as per your request
     telebirr_number = "0927922721"
     
-    # Use the username variable if available, otherwise fall back to ID
     contact_info = ADMIN_USERNAME if ADMIN_USERNAME else str(ADMIN_USER_ID)
     
-    # If a username is available, create a clickable link
     if ADMIN_USERNAME and ADMIN_USERNAME.startswith('@'):
         link_name = f"Admin ({ADMIN_USERNAME})"
-        # Markdown for a clickable link to the user
+        # Creates a clickable link using the username from Render
         link_message = f"[Send Receipt to {link_name}](https://t.me/{ADMIN_USERNAME.lstrip('@')})"
     else:
-        # Fallback to plain text if no username is set
         link_message = f"Send receipt to Admin: {contact_info}"
 
+    # UPDATED MESSAGE INSTRUCTIONS (Now points to /balance for ID)
     message = (
         f"**🏦 የገንዘብ ማስገቢያ (Deposit Instructions) 🏦**\n\n"
         f"1. Telebirr ቁጥር: **{telebirr_number}** ይጠቀሙ።\n"
-        f"2. የላኩበትን ደረሰኝ (Screenshot) ወዲያውኑ ለኛ ይላኩ:\n"
+        f"2. የላኩበትን ደረሰኝ (Screenshot) እና **የእርስዎ Telegram ID** ቁጥርዎን ይላኩ።\n"
+        f"   - (ID ቁጥር ለማግኘት: /balance ይጫኑ)\n" 
+        f"3. ደረሰኝ እና ID ቁጥርዎን ወዲያውኑ ለኛ ይላኩ:\n"
         f"{link_message}\n\n"
         f"_ገንዘብዎ በአንድ ደቂቃ ውስጥ ወደ ሂሳብዎ ይገባል!_"
     )
@@ -247,17 +258,19 @@ async def bingo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         await update.message.reply_text("❌ ውሸት! (Not a winner yet). Keep playing.")
 
-# --- Admin ---
+# --- Admin (Unchanged) ---
 async def approve_deposit_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Requires Admin ID to run
     if ADMIN_USER_ID is None or update.effective_user.id != ADMIN_USER_ID: return
     try:
         tid = int(context.args[0])
         amt = float(context.args[1])
         update_balance(tid, amt)
         await update.message.reply_text(f"✅ Approved {amt} to {tid}")
+        # Notify the target user
         await context.bot.send_message(tid, f"Deposit Approved: +{amt} Br")
     except:
-        await update.message.reply_text("Error. Usage: /ap_dep [id] [amt]")
+        await update.message.reply_text("Error. Usage: /ap_dep [id] [amt] (Both must be numbers)")
 
 # --- Main ---
 def main():
