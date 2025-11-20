@@ -29,7 +29,7 @@ GAME_COST = 10
 PRIZE_AMOUNT = 40 # 80% of 50
 
 # --- TEST SETTING: START WITH 1 PLAYER ---
-MIN_PLAYERS = 1 
+MIN_PLAYERS = 5 
 
 # --- Database Setup ---
 DB_STATUS = "Unknown"
