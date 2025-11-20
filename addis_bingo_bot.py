@@ -1,7 +1,5 @@
-# Addis (አዲስ) Bingo - V7.0: Adds Card Selection logic.
-# Players can now choose from 3 unique cards after sending /play.
-# This version maintains the Interactive Card (V6.0) features.
-# NOTE: MIN_PLAYERS is still set to 1 for testing.
+# Addis (አዲስ) Bingo - V8.1: Adds /instructions command and includes rules on /start.
+# This version features the Dynamic Card with automatic Green highlights and Card Selection.
 
 import os
 import logging
@@ -26,15 +24,25 @@ ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME')
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Global Game State (In-Memory) ---
-LOBBY = {} # Stores {user_id: [message_ids of card options]}
-ACTIVE_GAMES = {}
+# --- Constants ---
 GAME_COST = 10
 PRIZE_AMOUNT = 40 
-MIN_PLAYERS = 1 # *** REMEMBER TO CHANGE THIS TO 5 BEFORE GOING LIVE! ***
+MIN_PLAYERS = 1 # *** CHANGE THIS TO 5 BEFORE GOING LIVE! ***
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
 
-# --- Database Setup (Unchanged) ---
+# --- Emojis for Card State ---
+EMOJI_UNMARKED = '🔵' # Not called, not marked
+EMOJI_CALLED = '🟢'   # Called, not marked
+EMOJI_MARKED = '✅'   # Called, and marked by player
+EMOJI_FREE = '🌟'     # Free space
+
+# --- Global Game State (In-Memory) ---
+# Stores temporary data for card selection before the game starts
+LOBBY = {} 
+# Stores active game data, including player cards and called numbers
+ACTIVE_GAMES = {}
+
+# --- Database Setup ---
 DB_STATUS = "Unknown"
 ADMIN_USER_ID = None
 db = None
@@ -53,7 +61,7 @@ try:
 except Exception as e:
     DB_STATUS = f"Error: {e}"
 
-# --- Database Helpers (Unchanged) ---
+# --- Database Helpers ---
 USERS_COLLECTION = 'addis_bingo_users'
 
 def get_user_data(user_id: int) -> dict:
@@ -80,26 +88,63 @@ def update_balance(user_id: int, amount: float):
         'balance': firestore.Increment(amount)
     })
 
-# --- Bingo Logic ---
+# --- Bingo Card Logic ---
 
 def generate_card():
-    # Card Structure: Dictionary of lists for numbers, and a 'marked' dict for state.
+    # 'data': Actual numbers, 'marked': (c, r) -> True (player marked it), 'called': (c, r) -> True (bot called it)
     card_data = {
-        'B': random.sample(range(1, 16), 5),
-        'I': random.sample(range(16, 31), 5),
-        'N': random.sample(range(31, 46), 5),
-        'G': random.sample(range(46, 61), 5),
-        'O': random.sample(range(61, 76), 5),
-        'marked': {} 
+        'data': {
+            'B': random.sample(range(1, 16), 5),
+            'I': random.sample(range(16, 31), 5),
+            'N': random.sample(range(31, 46), 5),
+            'G': random.sample(range(46, 61), 5),
+            'O': random.sample(range(61, 76), 5),
+        },
+        'marked': {(2, 2): True}, # Free space is always marked
+        'called': {} 
     }
-    # Free space: N column (index 2), row 2
-    card_data['marked'][(2, 2)] = True
+    card_data['called'][(2, 2)] = True # Free space is also considered 'called'
     return card_data
 
 def get_card_value(card, col_idx, row_idx):
     if col_idx == 2 and row_idx == 2:
         return "FREE"
-    return card[COLUMNS[col_idx]][row_idx]
+    return card['data'][COLUMNS[col_idx]][row_idx]
+
+def get_card_position(card, value):
+    # Reverse lookup: find (col_idx, row_idx) for a number value
+    for c_idx, col_letter in enumerate(COLUMNS):
+        if col_letter == 'N': # Handle N column separately for the free space
+            for r_idx, v in enumerate(card['data'][col_letter]):
+                if r_idx == 2: continue # Skip the free space location
+                if v == value:
+                    return c_idx, r_idx
+        else:
+            try:
+                r_idx = card['data'][col_letter].index(value)
+                return c_idx, r_idx
+            except ValueError:
+                continue
+    return None, None
+
+async def refresh_all_player_cards(context: ContextTypes.DEFAULT_TYPE, game_id, players):
+    game_data = ACTIVE_GAMES[game_id]
+    
+    for pid in players:
+        card = game_data['cards'][pid]
+        msg_id = game_data['card_messages'][pid]
+        
+        # Rebuild and update the card with new states (called/marked)
+        new_keyboard = build_card_keyboard(card, -1, game_id, msg_id, is_selection=False)
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=pid,
+                message_id=msg_id,
+                reply_markup=new_keyboard
+            )
+        except Exception as e:
+            logger.error(f"Error refreshing card for {pid}: {e}")
+
 
 def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selection=True):
     keyboard = []
@@ -109,35 +154,43 @@ def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selectio
     for r in range(5):
         row = []
         for c in range(5):
+            pos = (c, r)
             value = get_card_value(card, c, r)
-            is_marked = card['marked'].get((c, r), False)
-            
-            if is_marked:
-                label = '✅' 
-                callback_data = f"ignore_marked"
+            is_marked = card['marked'].get(pos, False)
+            is_called = card['called'].get(pos, False)
+
+            if value == "FREE":
+                label = f"{EMOJI_FREE} {value}"
+                callback_data = f"ignore_free"
+            elif is_marked:
+                label = f"{EMOJI_MARKED} {value}" # Already marked by player
+                callback_data = f"MARK|{game_id}|{msg_id}|{c}|{r}" # Allow unmarking
+            elif is_called:
+                label = f"{EMOJI_CALLED} {value}" # Called but not marked by player
+                callback_data = f"MARK|{game_id}|{msg_id}|{c}|{r}" # Allow marking
             else:
-                label = str(value)
-                # If the game has started (is_selection=False), use MARK action
-                if not is_selection:
-                    callback_data = f"MARK|{game_id}|{msg_id}|{c}|{r}" 
-                # If player is selecting, buttons are not clickable for marking
-                else:
-                    callback_data = f"ignore_select"
+                label = f"{EMOJI_UNMARKED} {value}" # Not called yet
+                callback_data = f"ignore_not_called" # Cannot be marked
             
-            row.append(InlineKeyboardButton(label, callback_data=callback_data))
+            # If selecting a card, all buttons are ignored (except the select button)
+            if is_selection:
+                row.append(InlineKeyboardButton(str(value), callback_data=f"ignore_select_card_num"))
+            else:
+                row.append(InlineKeyboardButton(label, callback_data=callback_data))
+                
         keyboard.append(row)
     
     if is_selection:
         # Selection button for the initial choice phase
-        keyboard.append([InlineKeyboardButton(f"✅ Card {card_index}: ይሄንን ይምረጡ (Select This)", callback_data=f"SELECT|{card_index}")])
+        keyboard.append([InlineKeyboardButton(f"✅ Card {card_index+1}: ይሄንን ይምረጡ (Select This)", callback_data=f"SELECT|{card_index}")])
     else:
         # BINGO button for the active game phase
         keyboard.append([InlineKeyboardButton("🚨 CALL BINGO! 🚨", callback_data=f"BINGO|{game_id}|{msg_id}")])
     
     return InlineKeyboardMarkup(keyboard)
 
-def check_win(card, game_data):
-    # This check now uses the 'marked' dictionary.
+def check_win(card):
+    # This check uses the 'marked' dictionary.
     def is_marked(c, r):
         return card['marked'].get((c, r), False)
 
@@ -157,7 +210,7 @@ def check_win(card, game_data):
 
 # --- Game Loop ---
 async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
-    cards = ACTIVE_GAMES[game_id]['cards']
+    # Cards are now loaded from ACTIVE_GAMES[game_id]['cards']
     called = []
     available_numbers = list(range(1, 76))
     random.shuffle(available_numbers)
@@ -173,28 +226,71 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
         called.append(num)
         ACTIVE_GAMES[game_id]['called'] = called
         
-        # Determine the column (e.g., B-12)
+        # 1. Update all cards with the new 'called' number for the green highlight
+        for pid in players:
+            card = ACTIVE_GAMES[game_id]['cards'][pid]
+            c, r = get_card_position(card, num)
+            if c is not None and r is not None:
+                card['called'][(c, r)] = True
+
+        # Refresh all player cards to show the green highlight
+        await refresh_all_player_cards(context, game_id, players)
+
+        # 2. Send the number call message
         col_letter = next(col for col, (start, end) in [('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), ('G', (46, 60)), ('O', (61, 75))] if start <= num <= end)
-        msg = f"📣 ቁጥር (Number): **{col_letter}-{num}**\n\n_If you have this number, please tap the button on your card now!_"
+        msg = f"📣 ቁጥር (Number): **{col_letter}-{num}**\n\n_If you have this number, please tap the green button on your card now!_"
         
         for pid in players:
             try:
-                # Send the called number message
                 await context.bot.send_message(pid, msg, parse_mode='Markdown')
             except Exception as e:
                  logger.error(f"Error sending number call to {pid}: {e}")
         
         await asyncio.sleep(8) 
+    
+    # Game ended without a winner (very unlikely with 75 numbers)
+    if game_id in ACTIVE_GAMES:
+        for pid in players:
+            await context.bot.send_message(pid, "💔 ጨዋታው ተጠናቀቀ (Game Over). ሁሉም ቁጥሮች ተጠርተዋል።")
+        del ACTIVE_GAMES[game_id]
+
 
 # --- Handlers ---
+
+async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = (
+        "**📜 የመጫወቻ ህጎች (Game Rules) 📜**\n\n"
+        "1. **ክፍያ (Cost):** እያንዳንዱ ጨዋታ ለመጫወት **10 Br** ያስከፍላል።\n"
+        "2. **አሸናፊ (Winner):** 5 ተጫዋቾች ሲመዘገቡ ጨዋታው ይጀምራል (Testing: 1 ተጫዋች).\n"
+        "3. **ሽልማት (Prize):** ያሸነፉ ተጫዋቾች **40 Br** ወዲያውኑ ወደ ሂሳባቸው ይገባል!\n\n"
+        
+        "**🕹️ እንዴት እንጫወታለን? (How to Play) 🕹️**\n"
+        "1. **/play** ይጫኑ እና 10 Br ይከፍላሉ።\n"
+        "2. **3 የተለያዩ ካርዶች** ቀርበውልዎታል፤ የመረጡትን **'Select This'** የሚለውን ይጫኑ።\n"
+        "3. ቁጥሮች መጥራት ሲጀምሩ:\n"
+        "   - **🟢 አረንጓዴ ቁጥር (Green Button):** ይህ ቁጥር ተጠርቷል ማለት ነው።\n"
+        "   - **✅ ተጭነው ምልክት ያድርጉ (Tap to Mark):** ቁጥሩን በካርድዎ ላይ ምልክት ለማድረግ አረንጓዴውን ቁጥር ይጫኑ። ወደ **✅** ይቀየራል።\n"
+        "4. **ቢንጎ (BINGO):** 5 ምልክት የተደረገባቸው ቁጥሮች (✅) በአንድ ቀጥተኛ መስመር (አግድም፣ ቁመታዊ፣ ወይም ዲያጎናል) ሲገጥሙ:\n"
+        "   - **🚨 CALL BINGO! 🚨** የሚለውን ቁልፍ ይጫኑ።\n"
+        
+        "**እድለኛ ይሁኑ! (Good Luck!)**"
+    )
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     create_or_update_user(user_id, update.effective_user.username, update.effective_user.first_name)
-    await update.message.reply_text(f"እንኳን ወደ አዲስ ቢንጎ በደህና መጡ!\nSystem: {DB_STATUS}\n\nለመጫወት /play ይጫኑ (Cost: {GAME_COST} Birr).")
+    
+    await update.message.reply_text(
+        f"**👋 እንኳን ወደ አዲስ ቢንጎ በደህና መጡ!**\nSystem: {DB_STATUS}\n\n"
+        f"ለመጫወት /play ይጫኑ (Cost: {GAME_COST} Birr).\n\n"
+        f"**👉 እባክዎ ከመጀመርዎ በፊት ህጎችን ያንብቡ:**"
+    , parse_mode='Markdown')
+    
+    # Display the full instructions immediately after the welcome message
+    await instructions_command(update, context)
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # V5.4 Logic: Only shows balance
     user_id = update.effective_user.id
     data = get_user_data(user_id)
     balance = data.get('balance', 0.0)
@@ -208,7 +304,6 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # V5.4 Logic: ID is shown directly in deposit instructions
     user_id = update.effective_user.id
     telebirr_number = "0927922721"
     
@@ -244,42 +339,41 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"⛔ በቂ ሂሳብ የለዎትም (Not enough balance).\nያስፈልጋል: {GAME_COST} Br\nአለዎት: {data.get('balance', 0)} Br")
         return
 
-    # Check if user is already in a game or selecting a card
     if user_id in LOBBY or any(user_id in g['players'] for g in ACTIVE_GAMES.values()):
         await update.message.reply_text("⏳ ተራ ይጠብቁ (Already waiting or in a game).")
         return
 
-    # Deduct cost immediately
     update_balance(user_id, -GAME_COST)
     
-    # Generate 3 card options
     card_options = [generate_card() for i in range(3)]
-    
-    # Store message IDs for cleanup later
     card_message_ids = []
 
-    # Send the 3 options
     for i, card in enumerate(card_options):
+        # Build initial selection keyboard without emojis/dynamic state
         keyboard = build_card_keyboard(card, i, is_selection=True)
-        message_text = f"🃏 **Card Option {i+1}** 🃏\n\n_ይህን ካርድ ከመምረጥዎ በፊት ቁጥሮቹን በጥንቃቄ ይመልከቱ።_"
+        
+        # Format the card numbers clearly for selection
+        card_layout_text = ""
+        for r in range(5):
+            row_numbers = [str(get_card_value(card, c, r)) for c in range(5)]
+            card_layout_text += " ".join(row_numbers) + "\n"
+        
+        message_text = (
+            f"🃏 **Card Option {i+1}** 🃏\n\n"
+            f"```\n{COLUMNS[0]}  {COLUMNS[1]}  {COLUMNS[2]}  {COLUMNS[3]}  {COLUMNS[4]}\n{card_layout_text}```\n"
+            f"_ይህን ካርድ ከመምረጥዎ በፊት ቁጥሮቹን በጥንቃቄ ይመልከቱ።_"
+        )
+        
         msg = await context.bot.send_message(user_id, message_text, reply_markup=keyboard, parse_mode='Markdown')
         card_message_ids.append(msg.message_id)
 
-    # Add user to lobby with the card options and message IDs
     LOBBY[user_id] = {
         'cards': card_options,
         'message_ids': card_message_ids,
         'status': 'selecting_card'
     }
     
-    # Notification to wait for choice
     await context.bot.send_message(user_id, f"✅ {GAME_COST} Br ተቀንሷል። (Deducted {GAME_COST} Br).\n\n**እባክዎ ከላይ ካሉት 3 ካርዶች አንዱን ይምረጡ።**")
-
-    # Check if game can start (for testing, it's always 1/1)
-    if len(LOBBY) >= MIN_PLAYERS:
-        # Since we are using MIN_PLAYERS = 1 for testing, the game will be queued 
-        # but won't start until the player selects a card.
-        pass # Game starts after SELECT callback
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -289,63 +383,69 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data.split('|')
     action = data[0]
 
+    # --- Card Selection Phase ---
     if action == 'SELECT':
-        # Handles the player selecting one of the 3 cards
         if user_id not in LOBBY or LOBBY[user_id]['status'] != 'selecting_card':
             await query.answer("Invalid card selection or session expired.")
             return
 
         card_index = int(data[1])
-        lobby_data = LOBBY.pop(user_id) # Remove from lobby
-        
-        # Get the selected card and the list of message IDs for cleanup
+        lobby_data = LOBBY.pop(user_id) 
         selected_card = lobby_data['cards'][card_index]
         all_message_ids = lobby_data['message_ids']
         
         # 1. Clean up the other 2 card options
         for msg_id in all_message_ids:
             try:
-                if msg_id != query.message.message_id:
-                    await context.bot.delete_message(chat_id=user_id, message_id=msg_id)
-                else:
-                    # Edit the selected card's message to become the FINAL game card
+                # Edit the selected card's message to become the FINAL game card
+                if msg_id == query.message.message_id:
                     await context.bot.edit_message_text(
                         chat_id=user_id,
                         message_id=msg_id,
                         text=f"✅ Card Selected! ጨዋታው ሊጀምር ነው! (Game starting...)\n\n_Tap the numbers on the card below to mark them._",
-                        reply_markup=None # Remove the old selection button
+                        reply_markup=None 
                     )
+                else:
+                    await context.bot.delete_message(chat_id=user_id, message_id=msg_id)
             except Exception as e:
                 logger.error(f"Error cleaning up card messages: {e}")
 
-        # 2. Start the Game!
+        # 2. Start the Game Setup
         game_id = f"G{random.randint(1000,9999)}"
-        # Store the game data: one player for now, but ready for multiplayer structure
         
         # Send the final interactive card for the game
         final_keyboard = build_card_keyboard(selected_card, card_index, game_id, query.message.message_id, is_selection=False)
 
-        final_msg = await context.bot.edit_message_reply_markup(
-            chat_id=user_id,
-            message_id=query.message.message_id,
-            reply_markup=final_keyboard
+        final_msg = await context.bot.send_message(
+            user_id, 
+            "**🃏 የእርስዎ ቢንጎ ካርድ (Your Bingo Card) 🃏**\n\n_አረንጓዴ ቁጥር ሲመጣ ይጫኑ!_", 
+            reply_markup=final_keyboard, 
+            parse_mode='Markdown'
         )
+        
+        # Remove the previous confirmation message, if possible
+        try: await context.bot.delete_message(chat_id=user_id, message_id=query.message.message_id)
+        except: pass
 
         ACTIVE_GAMES[game_id] = {
             'players': [user_id], 
             'cards': {user_id: selected_card}, 
             'called': [], 
             'status': 'starting', 
-            'card_messages': {user_id: query.message.message_id}
+            'card_messages': {user_id: final_msg.message_id}
         }
         
-        await query.answer("Card selected! Get ready to play!")
+        # 3. Start the game loop (for testing, MIN_PLAYERS=1 makes it start immediately)
         asyncio.create_task(run_game_loop(context, game_id, [user_id]))
+        await query.answer("Card selected! Get ready to play!")
         return
 
     # --- MARK and BINGO (Active Game Logic) ---
     
     # Check if the player is in the active game
+    game_id = data[1] if len(data) > 1 else None
+    msg_id = int(data[2]) if len(data) > 2 else None
+
     if game_id not in ACTIVE_GAMES or user_id not in ACTIVE_GAMES[game_id]['players']:
         await query.answer("This game has ended or you are not a participant.")
         return
@@ -355,61 +455,62 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     if action == 'MARK':
         # MARK|GameID|MsgID|ColIndex|RowIndex
-        if len(data) < 5: return
+        if len(data) < 5: 
+            await query.answer("Invalid MARK data.")
+            return
         c, r = int(data[3]), int(data[4])
-        
-        called_numbers = game_data['called']
+        pos = (c, r)
         value = get_card_value(card, c, r)
         
-        if value == 'FREE':
-            await query.answer("Free space is already marked.")
+        is_already_marked = card['marked'].get(pos, False)
+
+        if not card['called'].get(pos, False) and value != 'FREE':
+            await query.answer("That number has not been called yet (Wait for the Green)! ⛔")
             return
 
-        if value not in called_numbers:
-            await query.answer("That number has not been called yet!")
-            return
-
-        # Toggle the marked state
-        pos = (c, r)
-        card['marked'][pos] = not card['marked'].get(pos, False)
+        # Toggle the marked state (if marked, unmark; if unmarked, mark)
+        card['marked'][pos] = not is_already_marked
         
         # Re-render the card
         new_keyboard = build_card_keyboard(card, -1, game_id, msg_id, is_selection=False)
         
         try:
             await query.edit_message_reply_markup(reply_markup=new_keyboard)
-            await query.answer(f"Number {value} {'marked' if card['marked'][pos] else 'unmarked'}")
+            await query.answer(f"Number {value} {'Marked ✅' if card['marked'][pos] else 'Unmarked 🟢'}")
         except Exception as e:
             logger.error(f"Error editing message reply markup: {e}")
             await query.answer("Error updating card. Is the message too old?")
 
     elif action == 'BINGO':
-        # Check for Win
-        if check_win(card, game_data):
+        # BINGO|GameID|MsgID
+        
+        # 1. Check for Win
+        if check_win(card):
             game_data['status'] = 'finished'
             update_balance(user_id, PRIZE_AMOUNT)
             
             winner_name = query.from_user.first_name
-            win_msg = f"🎉 BINGO!!! 🎉\n\nአሸናፊ (Winner): {winner_name}\nPrize: {PRIZE_AMOUNT} Br Added!"
+            win_msg = f"🎉 BINGO!!! 🎉\n\nአሸናፊ (Winner): **{winner_name}**\n**Prize: {PRIZE_AMOUNT} Br Added!**"
             
-            # Notify all players
+            # 2. Notify all players and remove game
             for pid in game_data['players']:
-                await context.bot.send_message(pid, win_msg)
+                await context.bot.send_message(pid, win_msg, parse_mode='Markdown')
             
-            # Clean up the winner's card
+            # 3. Final cleanup of the winner's card
             try:
                  await context.bot.edit_message_text(
                     chat_id=user_id,
                     message_id=msg_id,
-                    text=f"WINNER! Game Over.\nPrize: {PRIZE_AMOUNT} Br",
-                    reply_markup=None
+                    text=f"**🎉 WINNER! Game Over. 🎉**\nPrize: {PRIZE_AMOUNT} Br",
+                    reply_markup=None,
+                    parse_mode='Markdown'
                 )
-            except:
-                pass
+            except: pass
             
             del ACTIVE_GAMES[game_id]
+            await query.answer("BINGO! You Win! 🎉")
         else:
-            await query.answer("❌ ውሸት! (Not a winner yet). Keep playing.")
+            await query.answer("❌ ውሸት! (False Bingo). Keep playing. ❌")
 
 # --- Admin ---
 async def approve_deposit_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -433,6 +534,7 @@ def main():
     app.add_handler(CommandHandler("deposit", deposit_command))
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CommandHandler("play", play_command))
+    app.add_handler(CommandHandler("instructions", instructions_command))
     app.add_handler(CommandHandler("ap_dep", approve_deposit_admin))
     
     app.add_handler(CallbackQueryHandler(handle_callback))
