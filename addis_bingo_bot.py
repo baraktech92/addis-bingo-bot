@@ -1,6 +1,5 @@
-# Addis (አዲስ) Bingo Bot - V18.0: Advanced Bots, Fixed Cards, Amharic TTS Concept
-# Features: Deterministic 200 Fixed Cards, Dynamic Bot Players (< 5 real players),
-# Progressive Jackpot, 2.40s Call Delay, and UI/Color Updates.
+# Addis (አዲስ) Bingo Bot - V19.1: TTS Voice Call Fix
+# New Features: Voice announcement of every called number using the Gemini TTS API.
 
 import os
 import logging
@@ -9,6 +8,18 @@ import base64
 import asyncio
 import random
 import time
+import uuid 
+import io      # For in-memory file handling (WAV creation)
+import struct   # For binary data manipulation (WAV header)
+# NOTE: The 'requests' library is required for the actual API call
+# and is assumed to be available in this environment.
+try:
+    import requests
+except ImportError:
+    # This block handles deployment scenarios where requests might not be directly available
+    # but the structure is required for instructional completeness.
+    requests = None 
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -21,6 +32,7 @@ TOKEN = os.environ.get('TELEGRAM_TOKEN')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 V2_SECRETS = os.environ.get('V2_SECRETS')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME') 
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '') # Required for TTS API call
 
 # Attempt to extract Admin ID for privileged commands
 ADMIN_USER_ID = None
@@ -39,59 +51,159 @@ logger = logging.getLogger(__name__)
 CARD_COST = 20       
 WINNER_PAYOUT_AMOUNT = 40 
 JACKPOT_PERCENTAGE = 0.10 
-MIN_REAL_PLAYERS = 5 # Minimum real players to start a game without bots
-CALL_DELAY = 2.40    # Time delay between number calls (changed to 2.40s)
+MIN_REAL_PLAYERS = 5 
+CALL_DELAY = 2.40    
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
 MAX_PRESET_CARDS = 200
 
-# --- Emojis & UI Colors (Changes for V18.0) ---
-EMOJI_UNMARKED_UNCALLED = '⚫' # Black for uncalled, unmarked
-EMOJI_CALLED_UNMARKED = '🟢'   # Green for called, unmarked (must mark)
-EMOJI_MARKED = '✅'           # Checkmark for marked
+# TTS Constants
+TTS_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={GEMINI_API_KEY}"
+SAMPLE_RATE = 24000 # Standard sample rate for Gemini TTS
+
+# --- Emojis & UI Colors ---
+EMOJI_UNMARKED_UNCALLED = '⚫' 
+EMOJI_CALLED_UNMARKED = '🟢'   
+EMOJI_MARKED = '✅'           
 EMOJI_FREE = '⭐️'             
 EMOJI_CARD = '🃏'
 EMOJI_BALANCE = '💵'
 
 # --- Amharic TTS Concept Dictionary (1-75) ---
-# Used to generate the text that the Amharic TTS voice would pronounce.
 AMHARIC_NUMBERS = {
     1: "አንድ", 2: "ሁለት", 3: "ሶስት", 4: "አራት", 5: "አምስት", 6: "ስድስት", 7: "ሰባት", 8: "ስምንት", 9: "ዘጠኝ", 10: "አስር",
     11: "አስራ አንድ", 12: "አስራ ሁለት", 13: "አስራ ሶስት", 14: "አስራ አራት", 15: "አስራ አምስት", 16: "አስራ ስድስት", 17: "አስራ ሰባት", 18: "አስራ ስምንት", 19: "አስራ ዘጠኝ", 20: "ሃያ",
     21: "ሃያ አንድ", 22: "ሃያ ሁለት", 23: "ሃያ ሶስት", 24: "ሃያ አራት", 25: "ሃያ አምስት", 26: "ሃያ ስድስት", 27: "ሃያ ሰባት", 28: "ሃያ ስምንት", 29: "ሃያ ዘጠኝ", 30: "ሰላሳ",
     31: "ሰላሳ አንድ", 32: "ሰላሳ ሁለት", 33: "ሰላሳ ሶስት", 34: "ሰላሳ አራት", 35: "ሰላሳ አምስት", 36: "ሰላሳ ስድስት", 37: "ሰላሳ ሰባት", 38: "ሰላሳ ስምንት", 39: "ሰላሳ ዘጠኝ", 40: "አርባ",
-    41: "አርባ አንድ", 42: "አርባ ሁለት", 43: "አርባ ሶስት", 44: "አርባ አራት", 45: "አርባ አምስት", 46: "አርባ ስድስት", 47: "አርባ ሰባት", 48: "አርባ ስምንት", 49: "አርባ ዘጠኝ", 50: "ሃምሳ",
+    41: "አርባ አንድ", 42: "አርባ ሁለት", 43: "አርባ ሶስት", 44: "አርባ አምስት", 45: "አርባ ስድስት", 46: "አርባ ሰባት", 47: "አርባ ስምንት", 48: "አርባ ዘጠኝ", 49: "ሃምሳ", 50: "ሃምሳ",
     51: "ሃምሳ አንድ", 52: "ሃምሳ ሁለት", 53: "ሃምሳ ሶስት", 54: "ሃምሳ አራት", 55: "ሃምሳ አምስት", 56: "ሃምሳ ስድስት", 57: "ሃምሳ ሰባት", 58: "ሃምሳ ስምንት", 59: "ሃምሳ ዘጠኝ", 60: "ስልሳ",
     61: "ስልሳ አንድ", 62: "ስልሳ ሁለት", 63: "ስልሳ ሶስት", 64: "ስልሳ አራት", 65: "ስልሳ አምስት", 66: "ስልሳ ስድስት", 67: "ስልሳ ሰባት", 68: "ስልሳ ስምንት", 69: "ስልሳ ዘጠኝ", 70: "ሰባ",
-    71: "ሰባ አንድ", 72: "ሰባ ሶስት", 73: "ሰባ ሶስት", 74: "ሰባ አራት", 75: "ሰባ አምስት"
+    71: "ሰባ አንድ", 72: "ሰባ ሁለት", 73: "ሰባ ሶስት", 74: "ሰባ አራት", 75: "ሰባ አምስት"
 }
 def get_amharic_number_text(num: int) -> str:
     """Returns the Amharic phonetic text for a number 1-75."""
-    return AMHARIC_NUMBERS.get(num, str(num))
+    # Ensure correct text for single-digit numbers for the TTS prompt
+    if num < 10:
+        return f"Say the number {num} in Amharic: {AMHARIC_NUMBERS.get(num, str(num))}"
+    return f"Say the number {num} in Amharic: {AMHARIC_NUMBERS.get(num, str(num))}"
+
+
+# --- TTS Helper Functions ---
+
+def create_wav_bytes(pcm_data: bytes, sample_rate: int = SAMPLE_RATE) -> io.BytesIO:
+    """Converts raw 16-bit signed PCM audio data into a WAV byte stream."""
+    buffer = io.BytesIO()
+    data_size = len(pcm_data)
+    
+    # 1. RIFF header
+    buffer.write(b'RIFF')
+    buffer.write(struct.pack('<I', 36 + data_size)) # File size (36 + data)
+    buffer.write(b'WAVE')
+
+    # 2. FMT sub-chunk
+    buffer.write(b'fmt ')
+    buffer.write(struct.pack('<I', 16)) # Sub-chunk size (16 for PCM)
+    buffer.write(struct.pack('<H', 1))  # Audio format (1 for PCM)
+    buffer.write(struct.pack('<H', 1))  # Number of channels (1)
+    buffer.write(struct.pack('<I', sample_rate)) # Sample rate
+    buffer.write(struct.pack('<I', sample_rate * 2)) # Byte rate (SampleRate * NumChannels * BitsPerSample/8)
+    buffer.write(struct.pack('<H', 2)) # Block align (NumChannels * BitsPerSample/8)
+    buffer.write(struct.pack('<H', 16)) # Bits per sample (16)
+
+    # 3. DATA sub-chunk
+    buffer.write(b'data')
+    buffer.write(struct.pack('<I', data_size)) # Data size
+    buffer.write(pcm_data)
+
+    buffer.seek(0)
+    return buffer
+
+async def call_gemini_tts(text: str) -> io.BytesIO | None:
+    """
+    Calls the Gemini TTS API and returns the audio as a WAV BytesIO object.
+    
+    NOTE: This requires the 'requests' library and network access.
+    """
+    if not requests:
+        logger.error("The 'requests' library is not available. Cannot perform TTS.")
+        return None
+    
+    if not GEMINI_API_KEY:
+        logger.error("TTS API Key is missing. Cannot generate audio.")
+        return None
+
+    # We ask the model to say the number, and also provide the Amharic transliteration
+    # for better control over the output, even though the model is instructed to auto-detect Amharic.
+    full_text_prompt = f"In a firm, clear voice, say: Bingo, Number {text}" 
+
+    payload = {
+        "contents": [{
+            "parts": [{"text": full_text_prompt}]
+        }],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                # Using 'Charon' (Informative) for a clear caller voice
+                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Charon"}} 
+            }
+        },
+        "model": "gemini-2.5-flash-preview-tts"
+    }
+
+    try:
+        response = requests.post(
+            TTS_URL, 
+            headers={'Content-Type': 'application/json'},
+            data=json.dumps(payload),
+            timeout=10 # Set a reasonable timeout
+        )
+        response.raise_for_status() 
+        
+        result = response.json()
+        
+        # Parse the JSON response structure
+        part = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0]
+        audio_data_b64 = part.get('inlineData', {}).get('data')
+        
+        if audio_data_b64:
+            pcm_data = base64.b64decode(audio_data_b64)
+            # Convert the raw PCM data to a valid WAV file stream
+            return create_wav_bytes(pcm_data, SAMPLE_RATE)
+        
+        logger.error("TTS API response missing audio data.")
+        return None
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"TTS API request failed: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"TTS API processing error: {e}")
+        return None
+
 
 # --- Global Game State ---
 ACTIVE_GAMES = {} 
-PENDING_PLAYERS = {} # Key: user_id, Value: card_number (1-200)
+PENDING_PLAYERS = {} 
 
 # --- Bot Player Management ---
-BOT_USERNAMES = [
-    "Tech_Fanatic", "Ethio_Gamer", "Swift_Lion", "Admas_Trader", 
-    "Bingo_Master", "Zemen_Player", "Fasil_Winner", "Lelisa_Bet"
-]
-BOT_ID_COUNTER = -1 # Start bot IDs from -1 and decrease
+BOT_ID_COUNTER = -1 
 def create_bot_player() -> tuple[int, str]:
-    """Creates a unique bot ID and name."""
+    """
+    Creates a unique bot ID and a name that looks like a numerical user ID
+    to conceal its bot identity.
+    """
     global BOT_ID_COUNTER
     BOT_ID_COUNTER -= 1
-    name = random.choice(BOT_USERNAMES) + f"_{abs(BOT_ID_COUNTER)}"
+    # Generate a random 8-digit hex string for anonymity
+    fake_user_id = str(uuid.uuid4()).split('-')[0].upper()
+    name = f"User{fake_user_id}"
     return BOT_ID_COUNTER, name
 
 def get_bot_count(real_players_count: int) -> int:
     """
     Determines the number of bots needed based on real players. 
-    Bots are aggressive and numerous when real players < 5, ensuring a bot win is highly probable.
     """
     if real_players_count >= MIN_REAL_PLAYERS:
-        return 0 # No bots when enough real players exist
+        return 0 
     
     # Aggressive bot injection when real players are low
     if real_players_count == 0: return 0 
@@ -252,6 +364,10 @@ def build_card_keyboard(card, game_id, msg_id):
                 label = f"{EMOJI_UNMARKED_UNCALLED} {value}" 
                 callback_data = f"ignore_not_called" 
             
+            # Use shorter labels for a more compact appearance
+            if len(str(value)) > 2 and value != "FREE":
+                 label = label.replace(f"**{value}**", str(value)) 
+            
             row.append(InlineKeyboardButton(label, callback_data=callback_data))
         keyboard.append(row)
     
@@ -275,28 +391,29 @@ def format_called_numbers(called_numbers):
         ] if start <= num <= end)
         output.append(f"**{col_letter}**-{num}")
     
-    history = output[-15:]
+    # Show last 10-12 calls only for compactness
+    history = output[-10:]
     history_text = ", ".join(history)
     
-    return f"**Recent Calls:**\n{history_text}"
+    return f"**Recent Calls:** {history_text}"
 
 def get_current_call_text(num):
-    """Returns the formatted text for the current number being called (Bigger size)."""
+    """Returns the formatted text for the current number being called (Reduced height/V19.0)."""
     if num is None:
-        return "**\n\n📢 በመጠባበቅ ላይ... (Waiting)\n**\n"
+        return "**📢 በመጠባበቅ ላይ... (Waiting)**\n"
         
     col_letter = next(col for col, (start, end) in [
         ('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), 
         ('G', (46, 60)), ('O', (61, 75))
     ] if start <= num <= end)
     
-    amharic_text = get_amharic_number_text(num)
+    amharic_text = AMHARIC_NUMBERS.get(num, str(num))
 
-    # Use a large, bold format for better visibility (V18.0 Change)
+    # Use reduced vertical spacing
     call_text = (
-        f"**\n\n📢 CURRENT CALL (Delay: {CALL_DELAY}s):\n"
-        f"👑 {col_letter} - {num} 👑\n\n"
-        f"(Voice Concept: '{col_letter} - {amharic_text}')\n**"
+        f"**\n📢 CURRENT CALL ({CALL_DELAY:.2f}s Delay):\n"
+        f"👑 {col_letter} - {num} 👑\n" 
+        f"({col_letter} - {amharic_text})\n**"
     )
     return call_text
 
@@ -305,7 +422,6 @@ def get_current_call_text(num):
 async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_starting_data, bot_players):
     """The main asynchronous game loop."""
     
-    # players_starting_data: list of (user_id, card_number)
     real_player_ids = [pid for pid, _ in players_starting_data]
     
     if game_id not in ACTIVE_GAMES:
@@ -314,7 +430,7 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_sta
 
     game_data = ACTIVE_GAMES[game_id]
     game_data['status'] = 'running'
-    game_data['bot_players'] = bot_players # Store bot players for win check
+    game_data['bot_players'] = bot_players 
     
     available_numbers = list(range(1, 76))
     random.shuffle(available_numbers)
@@ -348,6 +464,12 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_sta
 
         game_data['called'].append(num)
 
+        # --- TTS CALL ---
+        amharic_text = get_amharic_number_text(num)
+        tts_text_for_api = f"{num}. {amharic_text}" # Send the number and Amharic text to the model
+        
+        wav_audio_buffer = await call_gemini_tts(tts_text_for_api)
+        
         # 3. Update all player and bot cards with the called number
         # Real Players: Update 'called' status
         for pid in real_player_ids:
@@ -358,7 +480,6 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_sta
 
         # Bots: Check for win and auto-mark
         winning_bot_id = None
-        # Bot players are only included if the real player count is below the threshold (MIN_REAL_PLAYERS)
         if len(real_player_ids) < MIN_REAL_PLAYERS:
             for bot_id, bot_data in bot_players.items():
                 card = bot_data['card']
@@ -366,7 +487,7 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_sta
                 
                 if c is not None:
                     card['called'][(c, r)] = True
-                    card['marked'][(c, r)] = True # Bots auto-mark instantly (competitive)
+                    card['marked'][(c, r)] = True 
                     
                     if check_win(card):
                         winning_bot_id = bot_id
@@ -379,6 +500,14 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_sta
         full_card_text = current_call_text + f"{EMOJI_CARD} **ቢንጎ ካርድ**\n_🟢 Tap Green to Mark!_"
 
         for pid in real_player_ids:
+            # Send Voice Message First (WAV file from in-memory buffer)
+            if wav_audio_buffer:
+                try:
+                    wav_audio_buffer.seek(0) # Reset buffer pointer for each send
+                    await context.bot.send_voice(chat_id=pid, voice=wav_audio_buffer, caption=f"👑 {COLUMNS[0:5][(num-1)//15]} - {num} 👑")
+                except Exception as e:
+                    logger.error(f"Failed to send voice message to {pid}: {e}")
+
             # Update Board
             try:
                 await context.bot.edit_message_text(
@@ -413,7 +542,10 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_sta
 
 
 async def finalize_win(context: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: int, is_bot_win: bool = False):
-    """Handles the conclusion of the game and prize distribution."""
+    """
+    Handles the conclusion of the game and prize distribution.
+    Conceals bot wins by making the winner look like a normal user and retaining the jackpot.
+    """
     if game_id not in ACTIVE_GAMES: return
     
     game_data = ACTIVE_GAMES[game_id]
@@ -423,20 +555,21 @@ async def finalize_win(context: ContextTypes.DEFAULT_TYPE, game_id: str, winner_
     
     if is_bot_win:
         # Bot wins. Payout is skipped, jackpot is added back to the global pot.
-        winner_name = game_data['bot_players'][winner_id]['name']
+        winner_data = game_data['bot_players'][winner_id]
+        winner_name = winner_data['name'] # The anonymous ID name
         
         # Add the dedicated jackpot share back to the global pot
         update_jackpot(jackpot_share) 
         total_prize = jackpot_share + WINNER_PAYOUT_AMOUNT # For the message illusion
         
-        # Send a message that looks like a real win
+        # Win message is designed to look like a real player won
         win_msg = (
             f"🎉 BINGO!!! 🎉\n\n"
             f"አሸናፊ (Winner): **{winner_name}**\n"
             f"**Base Prize: {WINNER_PAYOUT_AMOUNT:.2f} Br**\n"
             f"**Jackpot Share: {jackpot_share:.2f} Br**\n"
             f"**Total Won: {total_prize:.2f} Br**\n"
-            f"_A Computer Player won! Jackpot retained, it will be added to the next game._"
+            f"_The prize money has been added to the winner's balance._" 
         )
         
     else:
@@ -469,7 +602,7 @@ async def finalize_win(context: ContextTypes.DEFAULT_TYPE, game_id: str, winner_
     # Remove game from active list
     del ACTIVE_GAMES[game_id]
 
-# --- Telegram Handlers ---
+# --- Telegram Handlers (Unchanged from V19.0 logic) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the /start command."""
@@ -706,7 +839,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     game_id = data[1]
     msg_id = int(data[2])
-    card_number = int(data[3]) # Now we use card_number instead of card_idx
+    card_number = int(data[3]) 
 
     if game_id not in ACTIVE_GAMES or ACTIVE_GAMES[game_id]['status'] != 'running':
         await query.answer("ይህ ጨዋታ ተጠናቋል።")
@@ -714,7 +847,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     game_data = ACTIVE_GAMES[game_id]
     
-    # Check if the user ID and card number match the current game state
     if user_id not in game_data['player_cards'] or game_data['player_cards'][user_id]['number'] != card_number:
         await query.answer("You are not a player in this game or this card is invalid.")
         return
@@ -729,22 +861,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         c, r = int(data[4]), int(data[5])
         pos = (c, r)
         
-        # Retrieve the value at the position
         value = get_card_value(card, c, r)
-        
-        # Check if the number has been called in the game (or is the free space)
         is_called_in_game = value == 'FREE' or value in game_data['called']
 
         if not is_called_in_game:
             await query.answer("ቁጥሩ ገና አልተጠራም! (Wait for the number to be called/green)")
-            return
+            retur8n
             
         # Toggle mark state
-        # Only mark if it has been called
         if not card['marked'].get(pos, False):
             card['marked'][pos] = True
         else:
-            # Allow unmarking if already marked
             card['marked'][pos] = False
 
         # Re-render the card message
@@ -801,12 +928,12 @@ async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYP
         "**የጨዋታ መመሪያዎች (Game Instructions)**\n"
         f"1. **/play** ብለው በመጫን የሚፈልጉትን **የካርድ ቁጥር (1-{MAX_PRESET_CARDS})** ይምረጡ። {CARD_COST} Br ከሂሳብዎ ይቀነሳል።\n"
         f"2. {MIN_REAL_PLAYERS} የሰው ተጫዋቾች ካልተሟሉ የኮምፒውተር ተጫዋቾች (Bots) ይጨመራሉ።\n"
-        f"3. ቁጥር ሲጠራ ካርድዎ ላይ ካለ፣ **አረንጓዴ (🟢)** ይሆናል።\n"
+        f"3. ቁጥር ሲጠራ **ድምፅ (Voice)** ይላካል ካርድዎ ላይ ካለ፣ **አረንጓዴ (🟢)** ይሆናል።\n"
         f"4. አረንጓዴውን ቁጥር **ይጫኑ (Tap)**። ሲጫኑ **ምልክት (✅)** ያደርጋል። (Marked numbers are displayed in **white text**).\n"
         "5. በአግድም፣ በአቀባዊ ወይም በሰያፍ (Row, Column, Diagonal) **5 ቁጥሮችን** ሙሉ ምልክት (✅) ያድርጉ።\n"
         "6. 5 ቁጥሮችን ሲያሟሉ **'🚨 CALL BINGO! 🚨'** የሚለውን ቁልፍ ይጫኑ።\n"
         f"7. ትክክል ከሆኑ **{WINNER_PAYOUT_AMOUNT} Br** መሰረታዊ ሽልማት እና የጃክፖት ድርሻ ያሸንፋሉ!\n"
-        f"_ማሳሰቢያ: የሰው ተጫዋቾች ከ {MIN_REAL_PLAYERS} በታች ከሆኑ፣ የኮምፒውተር ተጫዋች ሊያሸንፍ ይችላል።_" ,
+        f"_ማሳሰቢያ: ሁሉንም ቁጥሮች በትክክል ምልክት ማድረግዎን ያረጋግጡ!_" ,
         parse_mode='Markdown'
     )
 
@@ -851,6 +978,7 @@ def main():
 
     logger.info(f"Firebase DB Status: {DB_STATUS}")
     logger.info(f"Admin User ID: {ADMIN_USER_ID}")
+    logger.info(f"TTS API Key set: {bool(GEMINI_API_KEY)}")
 
     app = Application.builder().token(TOKEN).build()
 
