@@ -1,5 +1,5 @@
-# Addis (አዲስ) Bingo - V9.5: BINGO Button Debugging
-# Adds robust error handling to the BINGO callback action to ensure feedback is given.
+# Addis (አዲስ) Bingo - V9.7: Admin Balance Check
+# Implements a new admin command to check a specific user's balance before withdrawal.
 
 import os
 import logging
@@ -219,6 +219,7 @@ def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selectio
     if is_selection:
         keyboard.append([InlineKeyboardButton(f"✅ Card {card_index+1}: ይሄንን ይምረጡ (Select This)", callback_data=f"SELECT|{card_index}")])
     else:
+        # Crucial BINGO button data format
         keyboard.append([InlineKeyboardButton("🚨 CALL BINGO! 🚨", callback_data=f"BINGO|{game_id}|{msg_id}")])
     
     return InlineKeyboardMarkup(keyboard)
@@ -458,11 +459,41 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
     
     user_id = query.from_user.id
+    
+    # Log raw data immediately for debugging
+    logger.info(f"Callback Data Received: {query.data}")
+
+    # Acknowledge the query immediately to stop the button spinning/unresponsiveness
+    try:
+        await query.answer()
+    except Exception as e:
+        logger.error(f"Failed to ACK query answer: {e}")
+        # Continue execution even if ACK fails
+
     data = query.data.split('|')
     action = data[0]
+
+    game_id = None
+    msg_id = None
+    
+    # Wrapped Data Extraction for safety
+    try:
+        if len(data) > 1:
+            game_id = data[1]
+        if len(data) > 2:
+            # Try to convert message ID to int, handle potential failure
+            msg_id = int(data[2])
+    except ValueError:
+        logger.error(f"Message ID not convertible to int: {data[2]}")
+        await query.answer("Internal data formatting error (Non-integer ID).")
+        return
+    except Exception as e:
+        logger.error(f"Error during data extraction: {e}")
+        await query.answer("Internal data formatting error.")
+        return
+
 
     if action == 'SELECT':
         if user_id not in LOBBY or LOBBY[user_id]['status'] != 'selecting_card':
@@ -474,14 +505,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         selected_card = lobby_data['cards'][card_index]
         all_message_ids = lobby_data['message_ids']
         
-        for msg_id in all_message_ids:
+        for mid in all_message_ids:
             try:
-                if msg_id != query.message.message_id:
-                    await context.bot.delete_message(chat_id=user_id, message_id=msg_id)
+                if mid != query.message.message_id:
+                    await context.bot.delete_message(chat_id=user_id, message_id=mid)
                 else:
                     await context.bot.edit_message_text(
                         chat_id=user_id,
-                        message_id=msg_id,
+                        message_id=mid,
                         text=f"✅ Card Selected! ጨዋታው ሊጀምር ነው! (Game starting...)\n\n_Tap the numbers on the card below to mark them._",
                         reply_markup=None 
                     )
@@ -512,14 +543,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         }
         
         asyncio.create_task(run_game_loop(context, game_id, [user_id]))
-        await query.answer("Card selected! Get ready to play!")
+        # query.answer() already called at the start
         return
 
     # --- MARK and BINGO (Active Game Logic) ---
     
-    game_id = data[1] if len(data) > 1 else None
-    msg_id = int(data[2]) if len(data) > 2 else None
-
     if game_id not in ACTIVE_GAMES or user_id not in ACTIVE_GAMES[game_id]['players']:
         await query.answer("This game has ended or you are not a participant.")
         return
@@ -564,7 +592,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 reply_markup=new_keyboard,
                 parse_mode='Markdown'
             )
-            await query.answer(f"Number {value} {'Marked ✅' if card['marked'][pos] else 'Unmarked 🔴'}")
+            # query.answer() already called at the start
         except Exception as e:
             logger.error(f"Error editing message reply markup: {e}")
             await query.answer("Error updating card. Is the message too old?")
@@ -601,7 +629,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 except: pass
                 
                 del ACTIVE_GAMES[game_id]
-                await query.answer("BINGO! You Win! 🎉")
+                # query.answer() already called at the start
             else:
                 # Loss Logic (False Bingo)
                 await query.answer("❌ ውሸት! (False Bingo). Keep playing. ❌")
@@ -612,6 +640,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 # --- Admin Commands ---
+async def check_balance_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Admin command to check any user's balance
+    if ADMIN_USER_ID is None or update.effective_user.id != ADMIN_USER_ID: return
+    
+    if not context.args:
+        await update.message.reply_text("⛔ Error. Usage: /check_balance [user_id]")
+        return
+        
+    try:
+        target_id = int(context.args[0])
+        data = get_user_data(target_id)
+        balance = data.get('balance', 0.0)
+        
+        await update.message.reply_text(
+            f"**✅ User Balance Check**\n"
+            f"User ID: `{target_id}`\n"
+            f"Balance: **{balance} Br**\n"
+            f"Name: {data.get('first_name', 'N/A')} (@{data.get('username', 'N/A')})"
+        , parse_mode='Markdown')
+        
+    except ValueError:
+        await update.message.reply_text("⛔ Error. User ID must be a valid number.")
+    except Exception as e:
+        logger.error(f"Error checking balance: {e}")
+        await update.message.reply_text("⛔ An unexpected error occurred while fetching the balance.")
+
 async def approve_deposit_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Admin command to ADD balance after a deposit is verified.
     if ADMIN_USER_ID is None or update.effective_user.id != ADMIN_USER_ID: return
@@ -632,7 +686,7 @@ async def approve_withdrawal_admin(update: Update, context: ContextTypes.DEFAULT
         amt = float(context.args[1])
         
         if get_user_data(tid).get('balance', 0) < amt:
-            await update.message.reply_text(f"⛔ User ID {tid} has insufficient balance ({get_user_data(tid).get('balance', 0)} Br) for {amt} Br withdrawal.")
+            await update.message.reply_text(f"⛔ User ID {tid} has insufficient balance ({get_user_data(tid).get('balance', 0)} Br) for {amt} Br withdrawal. Deduction aborted.")
             return
 
         update_balance(tid, -amt) # Withdrawal is negative
@@ -655,6 +709,7 @@ def main():
     app.add_handler(CommandHandler("instructions", instructions_command))
     
     # Admin Handlers
+    app.add_handler(CommandHandler("check_balance", check_balance_admin)) # NEW
     app.add_handler(CommandHandler("ap_dep", approve_deposit_admin))
     app.add_handler(CommandHandler("ap_wit", approve_withdrawal_admin)) 
     
