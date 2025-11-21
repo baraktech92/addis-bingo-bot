@@ -1,5 +1,5 @@
-# Addis (አዲስ) Bingo - V9.7: Admin Balance Check
-# Implements a new admin command to check a specific user's balance before withdrawal.
+# Addis (አዲስ) Bingo - V9.8: Referral System
+# Implements a functional referral system rewarding 10 Br upon a referred user's first game.
 
 import os
 import logging
@@ -30,6 +30,9 @@ PRIZE_AMOUNT = 40
 MIN_PLAYERS = 1      # *** CHANGE THIS TO 5 BEFORE GOING LIVE! ***
 CALL_DELAY = 2.03    # Delay between number calls
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
+
+# --- Referral Constant ---
+REFERRAL_REWARD = 10.0 # Reward in Birr for successfully referring an active player
 
 # --- Emojis for Card State ---
 EMOJI_UNMARKED = '🔴' # Red for uncalled
@@ -70,25 +73,78 @@ def get_user_data(user_id: int) -> dict:
         return doc.to_dict()
     return {'balance': 0, 'new_user': True}
 
-def create_or_update_user(user_id: int, username: str, first_name: str):
+def create_or_update_user(user_id: int, username: str, first_name: str, referred_by: int = None):
     if not db: return
     doc_ref = db.collection(USERS_COLLECTION).document(str(user_id))
-    if not doc_ref.get().exists:
-        doc_ref.set({
+    
+    # Check if user exists
+    doc = doc_ref.get()
+    if doc.exists:
+        # Update existing user if necessary, but don't overwrite referral link
+        doc_ref.update({
+            'username': username,
+            'first_name': first_name,
+        })
+    else:
+        # New user: set initial data and referral fields
+        initial_data = {
             'username': username,
             'first_name': first_name,
             'balance': 0.0,
-            'created_at': firestore.SERVER_TIMESTAMP
-        })
+            'created_at': firestore.SERVER_TIMESTAMP,
+            'referred_by': referred_by,
+            'referral_paid_status': 'PENDING' if referred_by else 'N/A'
+        }
+        doc_ref.set(initial_data)
 
 def update_balance(user_id: int, amount: float):
-    # amount is positive for deposit, negative for withdrawal/game cost
+    # amount is positive for deposit/reward, negative for withdrawal/game cost
     if not db: return
     db.collection(USERS_COLLECTION).document(str(user_id)).update({
         'balance': firestore.Increment(amount)
     })
 
-# --- Bingo Card Logic ---
+async def pay_referral_reward(context: ContextTypes.DEFAULT_TYPE, referred_id: int, referrer_id: int):
+    if not db: return
+    
+    referred_doc_ref = db.collection(USERS_COLLECTION).document(str(referred_id))
+    
+    try:
+        # Use a transaction to ensure atomic update and prevent double payment
+        @firestore.transactional
+        def transaction_update(transaction):
+            snapshot = referred_doc_ref.get(transaction=transaction)
+            current_status = snapshot.get('referral_paid_status')
+            
+            if current_status == 'PENDING':
+                # 1. Update referrer's balance
+                referrer_doc_ref = db.collection(USERS_COLLECTION).document(str(referrer_id))
+                transaction.update(referrer_doc_ref, {'balance': firestore.Increment(REFERRAL_REWARD)})
+                
+                # 2. Mark the referral as paid in the referred user's document
+                transaction.update(referred_doc_ref, {'referral_paid_status': 'PAID'})
+                
+                return True
+            return False
+
+        if transaction_update(db.transaction()):
+            # Send notifications only if the payment actually occurred
+            await context.bot.send_message(
+                referrer_id, 
+                f"🎉 **Referral Bonus!** 🎉\n\n**+{REFERRAL_REWARD} Br** has been added to your balance because your friend played their first game!",
+                parse_mode='Markdown'
+            )
+            await context.bot.send_message(
+                referred_id, 
+                f"🤝 Welcome Bonus Confirmation: Your referrer has received a bonus for your first game. Thanks for playing!",
+                parse_mode='Markdown'
+            )
+
+    except Exception as e:
+        logger.error(f"Error processing referral payment for {referred_id} to {referrer_id}: {e}")
+        # Log error but let the game continue
+
+# --- Bingo Card Logic (Omitted for brevity, kept same as V9.7) ---
 
 def generate_card():
     card_data = {
@@ -126,7 +182,6 @@ def get_card_position(card, value):
     return None, None
 
 def format_called_numbers_compact(called_numbers):
-    # V9.3: Only history, no current call
     if not called_numbers:
         return "--- ቁጥሮች ገና አልተጠሩም (No numbers called yet) ---"
     
@@ -142,13 +197,11 @@ def format_called_numbers_compact(called_numbers):
     
     return "\n".join(output)
 
-# V9.3: Extracts the current call text for the card message
 def get_current_call_text(num):
     if num is None:
         return "**📣 በመጠባበቅ ላይ... (Awaiting first call)**"
     col_letter = next(col for col, (start, end) in [('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), ('G', (46, 60)), ('O', (61, 75))] if start <= num <= end)
     
-    # Use large, bold formatting for prominence
     return f"**📣 አሁን የተጠራ (CURRENT CALL):**\n#️⃣ **{col_letter}-{num}**"
 
 
@@ -164,7 +217,7 @@ async def refresh_all_player_cards(context: ContextTypes.DEFAULT_TYPE, game_id, 
         new_keyboard = build_card_keyboard(card, -1, game_id, msg_id, is_selection=False)
         
         new_card_text = (
-            f"{current_call_text}\n\n" # Current call is now HERE
+            f"{current_call_text}\n\n" 
             f"**🃏 የእርስዎ ቢንጎ ካርድ (Your Bingo Card) 🃏**\n"
             f"_አረንጓዴ ቁጥር ሲመጣ ይጫኑ!_"
         )
@@ -182,7 +235,6 @@ async def refresh_all_player_cards(context: ContextTypes.DEFAULT_TYPE, game_id, 
 
 def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selection=True):
     keyboard = []
-    # Use just the letter for the header to reduce height
     header = [InlineKeyboardButton(col, callback_data=f"ignore_header") for col in COLUMNS]
     keyboard.append(header)
     
@@ -207,11 +259,9 @@ def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selectio
                 label = f"{EMOJI_UNMARKED}{value}" 
                 callback_data = f"ignore_not_called" 
             
-            # Use value only for selection buttons for compactness
             if is_selection:
                 row.append(InlineKeyboardButton(str(value), callback_data=f"ignore_select_card_num"))
             else:
-                # Use emoji + value for game buttons
                 row.append(InlineKeyboardButton(label, callback_data=callback_data))
                 
         keyboard.append(row)
@@ -219,7 +269,6 @@ def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selectio
     if is_selection:
         keyboard.append([InlineKeyboardButton(f"✅ Card {card_index+1}: ይሄንን ይምረጡ (Select This)", callback_data=f"SELECT|{card_index}")])
     else:
-        # Crucial BINGO button data format
         keyboard.append([InlineKeyboardButton("🚨 CALL BINGO! 🚨", callback_data=f"BINGO|{game_id}|{msg_id}")])
     
     return InlineKeyboardMarkup(keyboard)
@@ -228,21 +277,19 @@ def check_win(card):
     def is_marked(c, r):
         return card['marked'].get((c, r), False)
 
-    # Check rows
+    # Check rows, columns, and diagonals
     for r in range(5):
         if all(is_marked(c, r) for c in range(5)): return True
 
-    # Check columns
     for c in range(5):
         if all(is_marked(c, r) for r in range(5)): return True
 
-    # Check diagonals
     if all(is_marked(i, i) for i in range(5)): return True
     if all(is_marked(i, 4 - i) for i in range(5)): return True
     
     return False
 
-# --- Game Loop ---
+# --- Game Loop (Omitted for brevity, kept same as V9.7) ---
 async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
     called = []
     available_numbers = list(range(1, 76))
@@ -300,7 +347,6 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
             except Exception as e:
                  logger.debug(f"Error editing board message for {pid}: {e}")
         
-        # Use the requested fast delay
         await asyncio.sleep(CALL_DELAY) 
     
     if game_id in ACTIVE_GAMES:
@@ -311,12 +357,34 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
 
 # --- Handlers ---
 
+async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    # Get the bot's username (context.bot.username is typically the bot's @handle)
+    bot_username = context.bot.username
+    
+    if not bot_username:
+        await update.message.reply_text("⛔ Could not determine the bot's username. Please contact the administrator.")
+        return
+
+    # Telegram's standard deep-linking format: t.me/BOT_USERNAME?start=PAYLOAD
+    referral_link = f"https://t.me/{bot_username}?start={user_id}"
+    
+    message = (
+        f"**🔗 የእርስዎ የሪፈራል ሊንክ (Your Referral Link) 🔗**\n\n"
+        f"ይህን ሊንክ ለጓደኞችዎ ያጋሩ እና **{REFERRAL_REWARD} Br** ሽልማት ያግኙ! ሽልማቱ ጓደኛዎ የመጀመሪያ ጨዋታውን ሲጫወት ወዲያውኑ ወደ ሂሳብዎ ይገባል።\n\n"
+        f"**ለመጋራት ይጫኑ (Tap to Share):**\n`{referral_link}`"
+    )
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
 async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = (
         "**📜 የመጫወቻ ህጎች (Game Rules) 📜**\n\n"
         f"1. **ክፍያ (Cost):** እያንዳንዱ ጨዋታ ለመጫወት **{GAME_COST} Br** ያስከፍላል።\n"
         "2. **አሸናፊ (Winner):** 5 ተጫዋቾች ሲመዘገቡ ጨዋታው ይጀምራል (Testing: 1 ተጫዋች).\n"
-        f"3. **ሽልማት (Prize):** ያሸነፉ ተጫዋቾች **{PRIZE_AMOUNT} Br** ወዲያውኑ ወደ ሂሳባቸው ይገባል!\n\n"
+        f"3. **ሽልማት (Prize):** ያሸነፉ ተጫዋቾች **{PRIZE_AMOUNT} Br** ወዲያውኑ ወደ ሂሳባቸው ይገባል!\n"
+        f"4. **ጋብዝ (Refer):** ጓደኛን ጋብዘው የመጀመሪያ ጨዋታቸውን ሲጫወቱ **{REFERRAL_REWARD} Br** ሽልማት ያግኙ። /refer የሚለውን ይጫኑ።\n\n"
         
         "**🕹️ እንዴት እንጫወታለን? (How to Play) 🕹️**\n"
         "1. **/play** ይጫኑ እና የጨዋታውን ዋጋ ይከፍላሉ።\n"
@@ -337,12 +405,26 @@ async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return message
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    create_or_update_user(user_id, update.effective_user.username, update.effective_user.first_name)
+    user = update.effective_user
+    user_id = user.id
+    
+    referrer_id = None
+    if context.args:
+        try:
+            potential_referrer_id = int(context.args[0])
+            # Prevent self-referral
+            if potential_referrer_id != user_id:
+                referrer_id = potential_referrer_id
+        except ValueError:
+            logger.warning(f"Invalid referrer ID in start payload: {context.args[0]}")
+            
+    # Create or update user data, passing the potential referrer ID
+    create_or_update_user(user_id, user.username, user.first_name, referred_by=referrer_id)
     
     await update.message.reply_text(
         f"**👋 እንኳን ወደ አዲስ ቢንጎ በደህና መጡ!**\n\n"
-        f"ለመጫወት /play ይጫኑ (Cost: {GAME_COST} Birr).\n\n"
+        f"ለመጫወት /play ይጫኑ (Cost: {GAME_COST} Br).\n"
+        f"**👉 ጓደኛ ይጋብዙና {REFERRAL_REWARD} Br ያግኙ:** /refer\n\n"
         f"**👉 እባክዎ ከመጀመርዎ በፊት ህጎችን ያንብቡ:**"
     , parse_mode='Markdown')
     
@@ -426,6 +508,14 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("⏳ ተራ ይጠብቁ (Already waiting or in a game).")
         return
 
+    # Check for referral reward BEFORE deducting cost
+    referred_by = data.get('referred_by')
+    referral_status = data.get('referral_paid_status', 'N/A')
+    
+    if referred_by and referral_status == 'PENDING':
+        await pay_referral_reward(context, user_id, referred_by)
+        # Note: pay_referral_reward updates the status to 'PAID' within the transaction
+        
     # Deduct game cost (negative amount)
     update_balance(user_id, -GAME_COST)
     
@@ -459,18 +549,13 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    
     user_id = query.from_user.id
-    
-    # Log raw data immediately for debugging
     logger.info(f"Callback Data Received: {query.data}")
 
-    # Acknowledge the query immediately to stop the button spinning/unresponsiveness
     try:
         await query.answer()
     except Exception as e:
         logger.error(f"Failed to ACK query answer: {e}")
-        # Continue execution even if ACK fails
 
     data = query.data.split('|')
     action = data[0]
@@ -478,12 +563,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     game_id = None
     msg_id = None
     
-    # Wrapped Data Extraction for safety
     try:
         if len(data) > 1:
             game_id = data[1]
         if len(data) > 2:
-            # Try to convert message ID to int, handle potential failure
             msg_id = int(data[2])
     except ValueError:
         logger.error(f"Message ID not convertible to int: {data[2]}")
@@ -521,7 +604,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         game_id = f"G{random.randint(1000,9999)}"
         
-        # Initial text for the card message before first call
         initial_card_text = get_current_call_text(None) + "\n\n**🃏 የእርስዎ ቢንጎ ካርድ (Your Bingo Card) 🃏**\n_አረንጓዴ ቁጥር ሲመጣ ይጫኑ!_"
         
         final_keyboard = build_card_keyboard(selected_card, card_index, game_id, query.message.message_id, is_selection=False)
@@ -543,7 +625,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         }
         
         asyncio.create_task(run_game_loop(context, game_id, [user_id]))
-        # query.answer() already called at the start
         return
 
     # --- MARK and BINGO (Active Game Logic) ---
@@ -571,10 +652,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         card['marked'][pos] = not is_already_marked
         
-        # Get the current call number to correctly refresh the card text
         current_call_num = game_data['called'][-1] if game_data['called'] else None
-        
-        # Refresh the card text and keyboard together
         current_call_text = get_current_call_text(current_call_num)
         new_card_text = (
             f"{current_call_text}\n\n"
@@ -592,7 +670,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 reply_markup=new_keyboard,
                 parse_mode='Markdown'
             )
-            # query.answer() already called at the start
         except Exception as e:
             logger.error(f"Error editing message reply markup: {e}")
             await query.answer("Error updating card. Is the message too old?")
@@ -600,9 +677,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif action == 'BINGO':
         try:
             if check_win(card):
-                # Win Logic
                 game_data['status'] = 'finished'
-                update_balance(user_id, PRIZE_AMOUNT) # Prize is added (positive amount)
+                update_balance(user_id, PRIZE_AMOUNT) 
                 
                 winner_name = query.from_user.first_name
                 win_msg = f"🎉 BINGO!!! 🎉\n\nአሸናፊ (Winner): **{winner_name}**\n**Prize: {PRIZE_AMOUNT} Br Added!**"
@@ -629,9 +705,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 except: pass
                 
                 del ACTIVE_GAMES[game_id]
-                # query.answer() already called at the start
             else:
-                # Loss Logic (False Bingo)
                 await query.answer("❌ ውሸት! (False Bingo). Keep playing. ❌")
         
         except Exception as e:
@@ -640,6 +714,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 # --- Admin Commands ---
+
 async def check_balance_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Admin command to check any user's balance
     if ADMIN_USER_ID is None or update.effective_user.id != ADMIN_USER_ID: return
@@ -706,10 +781,11 @@ def main():
     app.add_handler(CommandHandler("deposit", deposit_command))
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CommandHandler("play", play_command))
+    app.add_handler(CommandHandler("refer", refer_command)) # NEW
     app.add_handler(CommandHandler("instructions", instructions_command))
     
     # Admin Handlers
-    app.add_handler(CommandHandler("check_balance", check_balance_admin)) # NEW
+    app.add_handler(CommandHandler("check_balance", check_balance_admin)) 
     app.add_handler(CommandHandler("ap_dep", approve_deposit_admin))
     app.add_handler(CommandHandler("ap_wit", approve_withdrawal_admin)) 
     
