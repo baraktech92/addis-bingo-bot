@@ -1,5 +1,5 @@
-# Addis (አዲስ) Bingo - V11.0: 200 Unique Cards, Choose 3
-# Changes: Increased card pool to 200 fixed, unique arrangements. Players choose 1 from 3 randomly selected cards.
+# Addis (አዲስ) Bingo - V12.0: Players can browse and select 1 from 200 fixed cards.
+# Changes: Replaced the 'choose 3' mechanic with a paginated card browsing system (1-200).
 
 import os
 import logging
@@ -8,7 +8,7 @@ import base64
 import asyncio
 import random
 import time
-import hashlib # For creating a consistent seed
+import hashlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -33,8 +33,8 @@ PRIZE_AMOUNT = 40
 MIN_REAL_PLAYERS = 5 
 CALL_DELAY = 2.40    
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
-TOTAL_CARD_POOL = 200 # New total number of unique, fixed cards
-CARDS_TO_CHOOSE = 3   # Number of cards offered to the player per /play
+TOTAL_CARD_POOL = 200 # Total number of unique, fixed cards
+CARDS_PER_PAGE = 25   # Number of card numbers to show per browsing page
 
 # --- Referral Constant ---
 REFERRAL_REWARD = 10.0 
@@ -46,11 +46,11 @@ EMOJI_MARKED = '✅'
 EMOJI_FREE = '🌟'     
 
 # --- Global Game State (In-Memory) ---
-LOBBY = {} 
+LOBBY = {} # Tracks browsing state: {user_id: {'page': int, 'main_msg_id': int, 'preview_msg_id': int}}
 ACTIVE_GAMES = {}
 BOT_WINNER_ID = -999999999 
 
-# --- Database Setup ---
+# --- Database Setup (Unchanged) ---
 DB_STATUS = "Unknown"
 ADMIN_USER_ID = None
 db = None
@@ -138,8 +138,7 @@ async def pay_referral_reward(context: ContextTypes.DEFAULT_TYPE, referred_id: i
     except Exception as e:
         logger.error(f"Error processing referral payment: {e}")
 
-# --- Fixed Bingo Cards Generation (200 unique cards) ---
-# We use a deterministic approach (seed) to ensure the 200 cards are always the same.
+# --- Fixed Bingo Cards Generation (200 unique cards - Unchanged) ---
 
 CARD_GENERATION_SEED = hashlib.sha256("AddisBingo_200UniqueCards".encode('utf-8')).hexdigest()
 
@@ -161,15 +160,12 @@ def generate_unique_bingo_cards(count=TOTAL_CARD_POOL):
         card_tuple = (data['B'], data['I'], data['N'], data['G'], data['O'])
         return data, card_tuple
 
-    # Generate the required number of unique cards
     for i in range(1, count + 1):
-        # Safety limit to prevent infinite loops if the card space was small (it is huge here)
         attempts = 0 
         while attempts < 100: 
             card_data_dict, card_data_tuple = create_card_data()
             if card_data_tuple not in card_set:
                 card_set.add(card_data_tuple)
-                # Store the fixed arrangement for the card ID
                 unique_cards[i] = {
                     'B': list(card_data_dict['B']), 
                     'I': list(card_data_dict['I']), 
@@ -182,10 +178,9 @@ def generate_unique_bingo_cards(count=TOTAL_CARD_POOL):
         else:
             logger.error(f"Could not generate unique card {i} after 100 attempts.")
         
-    random.seed() # Reset seed for general use
+    random.seed() 
     return unique_cards
 
-# Initialize the 200 fixed, unique bingo cards
 FIXED_BINGO_CARDS = generate_unique_bingo_cards(TOTAL_CARD_POOL)
 logger.info(f"Generated {len(FIXED_BINGO_CARDS)} fixed, unique Bingo cards.")
 
@@ -194,7 +189,7 @@ def generate_card(card_id: int):
     # Retrieve the fixed card data based on the ID
     fixed_data = FIXED_BINGO_CARDS.get(card_id)
     if not fixed_data:
-        # Fallback to a generic card if ID is out of the 1-200 range
+        # Fallback for error handling
         return generate_random_card_internal() 
 
     # Convert fixed data into the game state format
@@ -210,8 +205,8 @@ def generate_card(card_id: int):
     }
     return card_data
 
-# Internal random generator (only used for fallback/bot generation)
 def generate_random_card_internal():
+    # Only used for bot cards or fallback
     card_data = {
         'data': {
             'B': random.sample(range(1, 16), 5),
@@ -344,10 +339,7 @@ def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selectio
                 
         keyboard.append(row)
     
-    if is_selection:
-        # For selection phase, show the card number and select button
-        keyboard.append([InlineKeyboardButton(f"✅ Card {card_index}: ይሄንን ይምረጡ (Select This)", callback_data=f"SELECT|{card_index}")])
-    else:
+    if not is_selection:
         keyboard.append([InlineKeyboardButton("🚨 CALL BINGO! 🚨", callback_data=f"BINGO|{game_id}|{msg_id}")])
     
     return InlineKeyboardMarkup(keyboard)
@@ -367,10 +359,8 @@ def check_win(card):
     
     return False
 
-# --- TTS Logic (Gemini API) ---
+# --- TTS Logic (Gemini API) (Unchanged) ---
 async def text_to_speech_call(col_letter: str, number: int):
-    """Generates audio for the call: English letter + Amharic number, and returns the audio URL."""
-    # (TTS implementation remains the same, requires 'requests' module)
     import requests 
     prompt = (
         f"Say the letter {col_letter} in a clear English voice, and immediately follow it by saying the number {number} in Amharic (Ethiopian language)."
@@ -384,7 +374,7 @@ async def text_to_speech_call(col_letter: str, number: int):
             "responseModalities": ["AUDIO"],
             "speechConfig": {
                 "voiceConfig": {
-                    "prebuiltVoiceConfig": {"voiceName": "Kore"} # Clear Voice
+                    "prebuiltVoiceConfig": {"voiceName": "Kore"}
                 }
             }
         },
@@ -424,10 +414,7 @@ async def text_to_speech_call(col_letter: str, number: int):
     return None, None
 
 # --- Computer Player Logic (Unchanged) ---
-
 def add_computer_players(real_players: list) -> tuple:
-    """Adds bots based on the number of real players, ensuring 100% bot win chance if < MIN_REAL_PLAYERS."""
-    
     real_count = len(real_players)
     bots_to_add = 0
     bot_players = []
@@ -451,29 +438,17 @@ def add_computer_players(real_players: list) -> tuple:
     return real_players + bot_players, bot_players
 
 def generate_winning_sequence(game_data):
-    """
-    Creates a card and prioritizes the winning numbers for the BOT_WINNER_ID.
-    Returns: a modified list of available numbers, and the winning bot's card.
-    """
-    
-    # 1. Generate a standard random card for the winning bot
     bot_card = generate_random_card_internal()
-    
-    # 2. Select a winning line (e.g., the first row)
     winning_numbers = [get_card_value(bot_card, c, 0) for c in range(5)]
 
-    # 3. Create a list of all numbers 1-75, removing the winning numbers
     all_numbers = list(range(1, 76))
     for num in winning_numbers:
         if isinstance(num, int) and num in all_numbers:
             all_numbers.remove(num)
             
-    # 4. Shuffle the remaining numbers
     random.shuffle(all_numbers)
     
-    # 5. Insert the winning numbers strategically for a quick win
     final_win_num = winning_numbers.pop(random.randrange(len(winning_numbers)))
-    
     available_numbers = winning_numbers + all_numbers[:10] + [final_win_num] + all_numbers[10:]
     
     for num in winning_numbers:
@@ -489,7 +464,7 @@ def generate_winning_sequence(game_data):
 
 # --- Game Loop (Unchanged) ---
 async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, real_players):
-    import requests # Ensure requests is available in this async function
+    import requests 
 
     all_players, bot_players = add_computer_players(real_players)
     is_bot_game = len(bot_players) > 0
@@ -635,8 +610,110 @@ async def finalize_win(context: ContextTypes.DEFAULT_TYPE, game_id: str, winner_
     
     del ACTIVE_GAMES[game_id]
 
+# --- New Card Browsing & Selection Logic ---
 
-# --- Handlers ---
+def build_card_browser_keyboard(current_page: int):
+    """Generates the keyboard with card numbers for the current page."""
+    start_index = (current_page - 1) * CARDS_PER_PAGE + 1
+    end_index = min(current_page * CARDS_PER_PAGE, TOTAL_CARD_POOL)
+    
+    keyboard = []
+    
+    # Card number buttons (5 columns)
+    row = []
+    for card_id in range(start_index, end_index + 1):
+        row.append(InlineKeyboardButton(str(card_id).zfill(3), callback_data=f"PREVIEW|{card_id}"))
+        if len(row) == 5:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    # Navigation buttons
+    nav_row = []
+    total_pages = (TOTAL_CARD_POOL + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE
+    
+    if current_page > 1:
+        nav_row.append(InlineKeyboardButton("⬅️ የቀደመው (Prev)", callback_data=f"BROWSE|{current_page - 1}"))
+    else:
+        nav_row.append(InlineKeyboardButton("❌", callback_data="ignore_nav_left"))
+
+    nav_row.append(InlineKeyboardButton(f"ገጽ {current_page}/{total_pages}", callback_data="ignore_page_info"))
+
+    if current_page < total_pages:
+        nav_row.append(InlineKeyboardButton("ቀጣይ (Next) ➡️", callback_data=f"BROWSE|{current_page + 1}"))
+    else:
+        nav_row.append(InlineKeyboardButton("❌", callback_data="ignore_nav_right"))
+        
+    keyboard.append(nav_row)
+    
+    return InlineKeyboardMarkup(keyboard)
+
+def get_card_preview_text(card_id: int):
+    """Generates the text layout for a specific fixed card ID."""
+    fixed_data = FIXED_BINGO_CARDS.get(card_id)
+    if not fixed_data:
+        return f"Card ID {card_id} is invalid."
+        
+    card_layout_text = f"**B** **I** **N** **G** **O**\n"
+    
+    col_data = {
+         'B': fixed_data['B'],
+         'I': fixed_data['I'],
+         'N': fixed_data['N'], # Includes 'FREE'
+         'G': fixed_data['G'],
+         'O': fixed_data['O'],
+    }
+    
+    for r in range(5):
+        row_numbers = []
+        for col in COLUMNS:
+            val = col_data[col][r]
+            if val == 'FREE':
+                row_numbers.append(str('FREE').center(3))
+            else:
+                row_numbers.append(str(val).center(3))
+        card_layout_text += " ".join(row_numbers) + "\n"
+        
+    message_text = (
+        f"🃏 **Card Number {card_id} (የካርድ ቁጥር)** 🃏\n"
+        f"```\n{card_layout_text}```\n"
+        f"_ይህንን ካርድ መርጠው መጫወት ይችላሉ።_"
+    )
+    return message_text
+
+async def display_card_browser(context: ContextTypes.DEFAULT_TYPE, user_id: int, page: int = 1, initial_message_id: int = None):
+    """Handles sending or editing the main card browsing message."""
+    keyboard = build_card_browser_keyboard(page)
+    
+    text = (
+        f"**👆 ከ{TOTAL_CARD_POOL} ካርዶች ውስጥ የካርድ ቁጥር ይምረጡ (Select a Card ID from {TOTAL_CARD_POOL} Cards) 👆**\n\n"
+        f"_የሚፈልጉትን የካርድ ቁጥር ሲጫኑ የካርዱን ዝግጅት በዝርዝር ማየት ይችላሉ።_"
+    )
+    
+    # Update lobby state
+    LOBBY[user_id]['page'] = page
+    
+    if initial_message_id:
+        # Edit existing message
+        try:
+            await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=initial_message_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Error editing browser message: {e}")
+            await context.bot.send_message(user_id, "Error refreshing browser. Please try /play again.")
+            
+    else:
+        # Send new message
+        msg = await context.bot.send_message(user_id, text, reply_markup=keyboard, parse_mode='Markdown')
+        LOBBY[user_id]['main_msg_id'] = msg.message_id
+        LOBBY[user_id]['preview_msg_id'] = None # Clear previous preview message ID
+        
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -658,59 +735,13 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
     update_balance(user_id, -GAME_COST)
     
-    # Select 3 random, unique card IDs from the pool of 200
-    available_card_ids = random.sample(list(FIXED_BINGO_CARDS.keys()), CARDS_TO_CHOOSE) 
-    available_card_ids.sort() # Sort for presentation
-
-    card_options = {id: generate_card(id) for id in available_card_ids}
-    card_message_ids = []
-
-    await update.message.reply_text(f"✅ **{GAME_COST} Br ተቀንሷል። (Deducted {GAME_COST} Br).**\n\n**እባክዎ ከ{TOTAL_CARD_POOL} ካርዶች ውስጥ የተመረጡትን {CARDS_TO_CHOOSE} ካርዶች ይመልከቱ እና የሚፈልጉትን ቁጥር ይምረጡ።**")
-
-    for card_id in available_card_ids:
-        card = card_options[card_id]
-        
-        # Build the preview text using the fixed ID and numbers
-        card_layout_text = f"**B** **I** **N** **G** **O**\n"
-        
-        # Get the underlying fixed data directly for display consistency
-        fixed_data = FIXED_BINGO_CARDS.get(card_id)
-        if fixed_data:
-            col_data = {
-                 'B': fixed_data['B'],
-                 'I': fixed_data['I'],
-                 'N': fixed_data['N'], # Includes 'FREE'
-                 'G': fixed_data['G'],
-                 'O': fixed_data['O'],
-            }
-            
-            for r in range(5):
-                row_numbers = []
-                for col in COLUMNS:
-                    val = col_data[col][r]
-                    if val == 'FREE':
-                        row_numbers.append(str('FREE').center(3))
-                    else:
-                        row_numbers.append(str(val).center(3))
-                card_layout_text += " ".join(row_numbers) + "\n"
-        
-        message_text = (
-            f"🃏 **Card Number {card_id}** 🃏\n"
-            f"```\n{card_layout_text}```\n"
-            f"_ይህን ካርድ ከመምረጥዎ በፊት ቁጥሮቹን በጥንቃቄ ይመልከቱ።_"
-        )
-        
-        keyboard = build_card_keyboard(card, card_id, is_selection=True)
-
-        msg = await context.bot.send_message(user_id, message_text, reply_markup=keyboard, parse_mode='Markdown')
-        card_message_ids.append(msg.message_id)
-
-    LOBBY[user_id] = {
-        'cards': card_options,
-        'message_ids': card_message_ids,
-        'selected_ids': available_card_ids, 
-        'status': 'selecting_card'
-    }
+    await update.message.reply_text(f"✅ **{GAME_COST} Br ተቀንሷል። (Deducted {GAME_COST} Br).**")
+    
+    # Initialize Lobby State
+    LOBBY[user_id] = {'page': 1, 'main_msg_id': None, 'preview_msg_id': None}
+    
+    # Start the browsing process
+    await display_card_browser(context, user_id, 1, initial_message_id=None)
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -733,28 +764,75 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Error extracting game/msg ID: {e}")
 
-    if action == 'SELECT':
-        if user_id not in LOBBY or LOBBY[user_id]['status'] != 'selecting_card':
+    if action == 'ignore_header' or action.startswith('ignore_nav') or action.startswith('ignore_page'):
+        return # Ignore non-action buttons
+
+    # --- Card Browsing & Selection Logic ---
+    if action == 'BROWSE':
+        if user_id not in LOBBY or 'main_msg_id' not in LOBBY[user_id]:
+            await query.answer("Session expired. Please use /play again.")
+            return
+
+        new_page = int(data[1])
+        main_msg_id = LOBBY[user_id]['main_msg_id']
+        
+        # Clean up old preview message if it exists
+        if LOBBY[user_id]['preview_msg_id']:
+            try:
+                await context.bot.delete_message(chat_id=user_id, message_id=LOBBY[user_id]['preview_msg_id'])
+            except: pass
+            LOBBY[user_id]['preview_msg_id'] = None
+            
+        await display_card_browser(context, user_id, new_page, main_msg_id)
+        return
+
+    if action == 'PREVIEW':
+        if user_id not in LOBBY or 'main_msg_id' not in LOBBY[user_id]:
+            await query.answer("Session expired. Please use /play again.")
+            return
+
+        card_id = int(data[1])
+        preview_text = get_card_preview_text(card_id)
+        
+        select_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✅ Card {card_id}: ይሄንን ይምረጡ (Select This)", callback_data=f"SELECT_CARD|{card_id}")]
+        ])
+
+        # Delete old preview message if it exists
+        if LOBBY[user_id]['preview_msg_id']:
+            try:
+                await context.bot.delete_message(chat_id=user_id, message_id=LOBBY[user_id]['preview_msg_id'])
+            except: pass
+            
+        # Send new preview message
+        preview_msg = await context.bot.send_message(user_id, preview_text, reply_markup=select_keyboard, parse_mode='Markdown')
+        LOBBY[user_id]['preview_msg_id'] = preview_msg.message_id
+        return
+
+    if action == 'SELECT_CARD':
+        if user_id not in LOBBY or 'main_msg_id' not in LOBBY[user_id]:
             await query.answer("Invalid card selection or session expired.")
             return
 
         card_id = int(data[1])
-        lobby_data = LOBBY.pop(user_id) 
-        selected_card = lobby_data['cards'][card_id]
-        all_message_ids = lobby_data['message_ids']
+        selected_card = generate_card(card_id)
         
-        # Delete all 3 card messages
-        for mid in all_message_ids:
+        # Cleanup lobby messages
+        try:
+            await context.bot.delete_message(chat_id=user_id, message_id=LOBBY[user_id]['main_msg_id'])
+        except: pass
+        if LOBBY[user_id]['preview_msg_id']:
             try:
-                await context.bot.delete_message(chat_id=user_id, message_id=mid)
-            except Exception as e:
-                logger.debug(f"Error cleaning up card messages: {e}")
+                await context.bot.delete_message(chat_id=user_id, message_id=LOBBY[user_id]['preview_msg_id'])
+            except: pass
+        
+        LOBBY.pop(user_id) # End the selection state
 
         game_id = f"G{int(time.time() * 1000)}"
         
         initial_card_text = get_current_call_text(None) + "\n\n**🃏 የእርስዎ ቢንጎ ካርድ (Your Bingo Card) 🃏**\n_🟢 አረንጓዴ ቁጥር ሲመጣ ይጫኑ! (Numbers are White)_"
         
-        final_keyboard = build_card_keyboard(selected_card, card_id, game_id, 0, is_selection=False) # 0 is placeholder msg_id
+        final_keyboard = build_card_keyboard(selected_card, card_id, game_id, 0, is_selection=False) 
 
         final_msg = await context.bot.send_message(
             user_id, 
@@ -814,6 +892,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         return
 
+    # --- Game Play Logic (Unchanged) ---
     if action in ('MARK', 'BINGO'):
         if game_id not in ACTIVE_GAMES or user_id not in ACTIVE_GAMES[game_id]['players']:
             await query.answer("This game has ended or you are not a participant.")
@@ -892,7 +971,6 @@ async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Update instructions to reflect 200 cards and 3 card selection
     message = (
         "**📜 የመጫወቻ ህጎች (Game Rules) 📜**\n\n"
         f"1. **ክፍያ (Cost):** እያንዳንዱ ጨዋታ ለመጫወት **{GAME_COST} Br** ያስከፍላል።\n"
@@ -902,7 +980,7 @@ async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYP
         
         "**🕹️ እንዴት እንጫወታለን? (How to Play) 🕹️**\n"
         "1. **/play** ይጫኑ እና የጨዋታውን ዋጋ ይከፍላሉ።\n"
-        f"2. **የቢንጎ ካርድ ምርጫ (Card Selection):** ከ{TOTAL_CARD_POOL} ቋሚ ካርዶች ውስጥ በዘፈቀደ የተመረጡ **{CARDS_TO_CHOOSE}** ካርዶች ይቀርቡልዎታል። የሚፈልጉትን የካርድ ቁጥር ይምረጡ። ተመሳሳይ የካርድ ቁጥር ሁልጊዜም ተመሳሳይ የቁጥሮች ዝግጅት ይኖረዋል።\n"
+        f"2. **የቢንጎ ካርድ ምርጫ (Card Selection):** ከ{TOTAL_CARD_POOL} ቋሚ ካርዶች (Card 1 እስከ Card {TOTAL_CARD_POOL}) የሚፈልጉትን ቁጥር **በማገላበጥ** (Browse) ይመረጣሉ። የካርዱን ዝግጅት በዝርዝር ማየት እና መምረጥ ይችላሉ።\n"
         "3. **ጨዋታው ሲጀመር:** ቁጥሮች በድምጽ (Voice) ይጠራሉ፤ **የእንግሊዘኛ ፊደል (Letter) + የአማርኛ ቁጥር** ነው ጥሪው።\n"
         "   - **🟢 አረንጓዴ ቁጥር (Green Button):** ይህ ቁጥር አሁን ተጠርቷል ማለት ነው።\n"
         "   - **✅ ተጭነው ምልክት ያድርጉ (Tap to Mark):** ቁጥሩን በካርድዎ ላይ ምልክት ለማድረግ አረንጓዴውን ቁጥር ይጫኑ። ወደ **✅** ይቀየራል።\n"
