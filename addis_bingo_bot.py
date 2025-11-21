@@ -1,4 +1,4 @@
-# Addis (አዲስ) Bingo Bot - V11.0: Advanced Bots, Fixed Cards, Amharic TTS Concept
+# Addis (አዲስ) Bingo Bot - V18.0: Advanced Bots, Fixed Cards, Amharic TTS Concept
 # Features: Deterministic 200 Fixed Cards, Dynamic Bot Players (< 5 real players),
 # Progressive Jackpot, 2.40s Call Delay, and UI/Color Updates.
 
@@ -44,12 +44,13 @@ CALL_DELAY = 2.40    # Time delay between number calls (changed to 2.40s)
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
 MAX_PRESET_CARDS = 200
 
-# --- Emojis & UI Colors (Changes for V11.0) ---
+# --- Emojis & UI Colors (Changes for V18.0) ---
 EMOJI_UNMARKED_UNCALLED = '⚫' # Black for uncalled, unmarked
 EMOJI_CALLED_UNMARKED = '🟢'   # Green for called, unmarked (must mark)
 EMOJI_MARKED = '✅'           # Checkmark for marked
 EMOJI_FREE = '⭐️'             
 EMOJI_CARD = '🃏'
+EMOJI_BALANCE = '💵'
 
 # --- Amharic TTS Concept Dictionary (1-75) ---
 # Used to generate the text that the Amharic TTS voice would pronounce.
@@ -61,7 +62,7 @@ AMHARIC_NUMBERS = {
     41: "አርባ አንድ", 42: "አርባ ሁለት", 43: "አርባ ሶስት", 44: "አርባ አራት", 45: "አርባ አምስት", 46: "አርባ ስድስት", 47: "አርባ ሰባት", 48: "አርባ ስምንት", 49: "አርባ ዘጠኝ", 50: "ሃምሳ",
     51: "ሃምሳ አንድ", 52: "ሃምሳ ሁለት", 53: "ሃምሳ ሶስት", 54: "ሃምሳ አራት", 55: "ሃምሳ አምስት", 56: "ሃምሳ ስድስት", 57: "ሃምሳ ሰባት", 58: "ሃምሳ ስምንት", 59: "ሃምሳ ዘጠኝ", 60: "ስልሳ",
     61: "ስልሳ አንድ", 62: "ስልሳ ሁለት", 63: "ስልሳ ሶስት", 64: "ስልሳ አራት", 65: "ስልሳ አምስት", 66: "ስልሳ ስድስት", 67: "ስልሳ ሰባት", 68: "ስልሳ ስምንት", 69: "ስልሳ ዘጠኝ", 70: "ሰባ",
-    71: "ሰባ አንድ", 72: "ሰባ ሁለት", 73: "ሰባ ሶስት", 74: "ሰባ አራት", 75: "ሰባ አምስት"
+    71: "ሰባ አንድ", 72: "ሰባ ሶስት", 73: "ሰባ ሶስት", 74: "ሰባ አራት", 75: "ሰባ አምስት"
 }
 def get_amharic_number_text(num: int) -> str:
     """Returns the Amharic phonetic text for a number 1-75."""
@@ -85,14 +86,18 @@ def create_bot_player() -> tuple[int, str]:
     return BOT_ID_COUNTER, name
 
 def get_bot_count(real_players_count: int) -> int:
-    """Determines the number of bots needed based on real players."""
+    """
+    Determines the number of bots needed based on real players. 
+    Bots are aggressive and numerous when real players < 5, ensuring a bot win is highly probable.
+    """
     if real_players_count >= MIN_REAL_PLAYERS:
         return 0 # No bots when enough real players exist
     
-    if real_players_count == 0: return 0 # Should not start with 0
-    if real_players_count == 1: return random.randint(7, 8) # Between 7-8
-    if real_players_count in (2, 3): return random.randint(10, 12) # Between 10-12
-    if real_players_count == 4: return random.randint(10, 20) # Between 10-20
+    # Aggressive bot injection when real players are low
+    if real_players_count == 0: return 0 
+    if real_players_count == 1: return random.randint(7, 8) 
+    if real_players_count in (2, 3): return random.randint(10, 12) 
+    if real_players_count == 4: return random.randint(10, 20) 
     return 0
 
 # --- Database Setup (Unchanged) ---
@@ -178,6 +183,7 @@ def get_card_value(card, col_idx, row_idx):
     
     col_list = card['data'][col_letter]
     if col_letter == 'N':
+        # N column has the free space at (2, 2), so we skip one index
         return col_list[row_idx] if row_idx < 2 else col_list[row_idx - 1] if row_idx > 2 else 'FREE'
     
     return card['data'][col_letter][row_idx]
@@ -188,6 +194,7 @@ def get_card_position(card, value):
         if col_letter == 'N':
             for r_idx, v in enumerate(card['data'][col_letter]):
                 if v == value:
+                    # Adjust row index for the free space in N column
                     return c_idx, r_idx if r_idx < 2 else r_idx + 1
             if value == 'FREE':
                 return 2, 2
@@ -233,12 +240,12 @@ def build_card_keyboard(card, game_id, msg_id):
                 label = f"{EMOJI_FREE}"
                 callback_data = f"ignore_free"
             elif is_marked:
-                # Marked: Display checkmark with white text (using Markdown bold for white-like text contrast)
+                # Marked: Display checkmark with white text (using Markdown bold for contrast)
                 label = f"{EMOJI_MARKED} **{value}**" 
                 callback_data = f"MARK|{game_id}|{msg_id}|{card['number']}|{c}|{r}" 
             elif is_called:
                 # Called but unmarked: Green circle with white text
-                label = f"{EMOJI_CALLED} **{value}**" 
+                label = f"{EMOJI_CALLED_UNMARKED} **{value}**" 
                 callback_data = f"MARK|{game_id}|{msg_id}|{card['number']}|{c}|{r}" 
             else:
                 # Uncalled and unmarked: Black circle with dark gray text
@@ -276,7 +283,7 @@ def format_called_numbers(called_numbers):
 def get_current_call_text(num):
     """Returns the formatted text for the current number being called (Bigger size)."""
     if num is None:
-        return "**📣 በመጠባበቅ ላይ... (Waiting)**\n"
+        return "**\n\n📢 በመጠባበቅ ላይ... (Waiting)\n**\n"
         
     col_letter = next(col for col, (start, end) in [
         ('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), 
@@ -285,9 +292,9 @@ def get_current_call_text(num):
     
     amharic_text = get_amharic_number_text(num)
 
-    # Use a large, bold format for better visibility (V3.0 Change)
+    # Use a large, bold format for better visibility (V18.0 Change)
     call_text = (
-        f"**\n\n📢 CURRENT CALL (2.40s Delay):\n"
+        f"**\n\n📢 CURRENT CALL (Delay: {CALL_DELAY}s):\n"
         f"👑 {col_letter} - {num} 👑\n\n"
         f"(Voice Concept: '{col_letter} - {amharic_text}')\n**"
     )
@@ -298,7 +305,7 @@ def get_current_call_text(num):
 async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_starting_data, bot_players):
     """The main asynchronous game loop."""
     
-    # player_starting_data: list of (user_id, card_number)
+    # players_starting_data: list of (user_id, card_number)
     real_player_ids = [pid for pid, _ in players_starting_data]
     
     if game_id not in ACTIVE_GAMES:
@@ -351,6 +358,7 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_sta
 
         # Bots: Check for win and auto-mark
         winning_bot_id = None
+        # Bot players are only included if the real player count is below the threshold (MIN_REAL_PLAYERS)
         if len(real_player_ids) < MIN_REAL_PLAYERS:
             for bot_id, bot_data in bot_players.items():
                 card = bot_data['card']
@@ -358,7 +366,7 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_sta
                 
                 if c is not None:
                     card['called'][(c, r)] = True
-                    card['marked'][(c, r)] = True # Bots auto-mark
+                    card['marked'][(c, r)] = True # Bots auto-mark instantly (competitive)
                     
                     if check_win(card):
                         winning_bot_id = bot_id
@@ -368,7 +376,7 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_sta
         current_call_text = get_current_call_text(num)
         board_history_text = format_called_numbers(game_data['called'])
         full_board_text = f"**🎰 የተጠሩ ቁጥሮች ታሪክ (History) 🎰**\n{board_history_text}"
-        full_card_text = current_call_text + f"{EMOJI_CARD} **ቢንጎ ካርድ**\n_🟢 አረንጓዴ ቁጥር ሲመጣ ይጫኑ!_"
+        full_card_text = current_call_text + f"{EMOJI_CARD} **ቢንጎ ካርድ**\n_🟢 Tap Green to Mark!_"
 
         for pid in real_player_ids:
             # Update Board
@@ -414,14 +422,12 @@ async def finalize_win(context: ContextTypes.DEFAULT_TYPE, game_id: str, winner_
     jackpot_share = game_data['jackpot_share']
     
     if is_bot_win:
-        # Bot wins when real players < 5. Payout is skipped, jackpot is retained/reset.
-        # Use a fake name for the winner illusion
+        # Bot wins. Payout is skipped, jackpot is added back to the global pot.
         winner_name = game_data['bot_players'][winner_id]['name']
         
-        # The jackpot share that was dedicated to the game is added back to the global pot.
-        # This keeps the illusion that the jackpot is paid, but it's re-added by the system.
-        update_jackpot(jackpot_share * len(game_data['players'])) 
-        total_prize = jackpot_share + WINNER_PAYOUT_AMOUNT # Just for the message illusion
+        # Add the dedicated jackpot share back to the global pot
+        update_jackpot(jackpot_share) 
+        total_prize = jackpot_share + WINNER_PAYOUT_AMOUNT # For the message illusion
         
         # Send a message that looks like a real win
         win_msg = (
@@ -430,7 +436,7 @@ async def finalize_win(context: ContextTypes.DEFAULT_TYPE, game_id: str, winner_
             f"**Base Prize: {WINNER_PAYOUT_AMOUNT:.2f} Br**\n"
             f"**Jackpot Share: {jackpot_share:.2f} Br**\n"
             f"**Total Won: {total_prize:.2f} Br**\n"
-            f"_Please note, only real players receive balance updates._"
+            f"_A Computer Player won! Jackpot retained, it will be added to the next game._"
         )
         
     else:
@@ -480,9 +486,24 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"የእርስዎ ቀሪ ሂሳብ: **{data.get('balance', 0.0):.2f} Br**\n"
         f"**💰 Progressive Jackpot:** **{jackpot:.2f} Br**\n\n"
         f"ለመጀመር: /play\n"
+        f"ቀሪ ሂሳብ: /balance\n"
         f"መመሪያዎች: /instructions",
         parse_mode='Markdown'
     )
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /balance command to display current user balance."""
+    user = update.effective_user
+    data = get_user_data(user.id)
+    jackpot = await get_jackpot_amount(context)
+    
+    await update.message.reply_text(
+        f"{EMOJI_BALANCE} **የእርስዎ ቀሪ ሂሳብ (Your Balance):** **{data.get('balance', 0.0):.2f} Br**\n"
+        f"**💰 Progressive Jackpot:** **{jackpot:.2f} Br**\n"
+        f"ለመጫወት: /play",
+        parse_mode='Markdown'
+    )
+
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompts player to choose one card number (1-200)."""
@@ -499,7 +520,11 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # Create card selection keyboard (10 buttons for preview)
     keyboard = []
-    card_options = random.sample(range(1, MAX_PRESET_CARDS + 1), min(10, MAX_PRESET_CARDS))
+    # Ensure selected cards are not currently in use by other pending players
+    used_cards = set(PENDING_PLAYERS.values())
+    available_cards = [c for c in range(1, MAX_PRESET_CARDS + 1) if c not in used_cards]
+    
+    card_options = random.sample(available_cards, min(10, len(available_cards)))
     
     row = []
     for card_num in card_options:
@@ -509,7 +534,8 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             row = []
     if row: keyboard.append(row)
     
-    # Add manual input option
+    # Add refresh button if there are many cards left, or a manual input option
+    keyboard.append([InlineKeyboardButton("Refresh Card Options", callback_data="SELECT_CARD_REFRESH")])
     keyboard.append([InlineKeyboardButton("Choose Specific Card (1-200)", callback_data="SELECT_CARD_MANUAL")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -531,15 +557,24 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data.split('|')
     action = data[0]
 
+    if action == "SELECT_CARD_REFRESH":
+        # Re-run play_command logic to generate new random options
+        await play_command(update, context) 
+        return
+
     if action == "SELECT_CARD_MANUAL":
+        # Simplified manual input handling (requires user to type number)
         await query.edit_message_text("እባክዎ የሚፈልጉትን የካርድ ቁጥር (1 እስከ 200) ያስገቡ። ለምሳሌ: `145`")
-        # Note: This is simplified. For full robustness, you would need a ConversationHandler
         return
 
     if action == "SELECT_CARD":
         card_number = int(data[1])
         if not (1 <= card_number <= MAX_PRESET_CARDS):
             await query.edit_message_text(f"❌ ልክ ያልሆነ የካርድ ቁጥር። እባክዎ ከ1 እስከ {MAX_PRESET_CARDS} ይምረጡ።")
+            return
+        
+        if card_number in PENDING_PLAYERS.values():
+            await query.edit_message_text(f"❌ ካርድ #{card_number} በሌላ ተጫዋች ተመርጧል። እባክዎ ሌላ ይምረጡ።")
             return
             
         total_cost = CARD_COST
@@ -596,7 +631,7 @@ async def start_new_game(context: ContextTypes.DEFAULT_TYPE):
     
     game_id = f"G{int(time.time()*1000)}"
     
-    # 1. Add Bot Players if needed
+    # 1. Add Bot Players if needed (if real_player_count < 5)
     bot_players = {}
     bot_count = get_bot_count(real_player_count)
     
@@ -635,15 +670,10 @@ async def start_new_game(context: ContextTypes.DEFAULT_TYPE):
     ACTIVE_GAMES[game_id] = game_data
     
     # 3. Calculate and Dedicate Jackpot Share
-    # Total participants (real + bots) = total shares
-    total_participants = real_player_count + bot_count 
-    jackpot_amount = await get_jackpot_amount(context)
-    
-    # Calculate share based on real players' contributions
+    # Total contribution is based on real players' card costs
     total_contribution = real_player_count * CARD_COST * JACKPOT_PERCENTAGE
     
-    # The jackpot share that is potentially paid to a winner is the total contribution made by real players.
-    # If a real player wins, they get all this. If a bot wins, it's recycled.
+    # This is the amount that will be awarded to the winner (real or bot)
     game_data['jackpot_share'] = total_contribution 
     
     # Reduce global jackpot by the amount dedicated to this game
@@ -663,7 +693,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data.split('|')
     action = data[0]
 
-    if action in ['SELECT_CARD', 'SELECT_CARD_MANUAL']:
+    if action in ['SELECT_CARD', 'SELECT_CARD_MANUAL', 'SELECT_CARD_REFRESH']:
         await handle_card_selection(update, context)
         return
 
@@ -684,6 +714,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     game_data = ACTIVE_GAMES[game_id]
     
+    # Check if the user ID and card number match the current game state
     if user_id not in game_data['player_cards'] or game_data['player_cards'][user_id]['number'] != card_number:
         await query.answer("You are not a player in this game or this card is invalid.")
         return
@@ -698,13 +729,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         c, r = int(data[4]), int(data[5])
         pos = (c, r)
         
-        if not card['called'].get(pos, False):
+        # Retrieve the value at the position
+        value = get_card_value(card, c, r)
+        
+        # Check if the number has been called in the game (or is the free space)
+        is_called_in_game = value == 'FREE' or value in game_data['called']
+
+        if not is_called_in_game:
             await query.answer("ቁጥሩ ገና አልተጠራም! (Wait for the number to be called/green)")
             return
             
         # Toggle mark state
-        card['marked'][pos] = not card['marked'].get(pos, False)
-        
+        # Only mark if it has been called
+        if not card['marked'].get(pos, False):
+            card['marked'][pos] = True
+        else:
+            # Allow unmarking if already marked
+            card['marked'][pos] = False
+
         # Re-render the card message
         current_num = game_data['called'][-1] if game_data['called'] else None
         new_text = get_current_call_text(current_num) + f"{EMOJI_CARD} **ቢንጎ ካርድ #{card['number']}**\n_🟢 Tap Green to Mark!_"
@@ -757,14 +799,14 @@ async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handles the /instructions command."""
     await update.message.reply_text(
         "**የጨዋታ መመሪያዎች (Game Instructions)**\n"
-        "1. **/play** ብለው በመጫን የሚፈልጉትን **የካርድ ቁጥር (1-200)** ይምረጡ። {CARD_COST} Br ከሂሳብዎ ይቀነሳል።\n"
-        "2. {MIN_REAL_PLAYERS} የሰው ተጫዋቾች ካልተሟሉ የኮምፒውተር ተጫዋቾች (Bots) ይጨመራሉ።\n"
-        "3. ቁጥር ሲጠራ ካርድዎ ላይ ካለ፣ **አረንጓዴ (🟢)** ይሆናል።\n"
-        "4. አረንጓዴውን ቁጥር **ይጫኑ (Tap)**። ሲጫኑ **ምልክት (✅)** ያደርጋል። (Marked numbers are displayed in **white text**).\n"
+        f"1. **/play** ብለው በመጫን የሚፈልጉትን **የካርድ ቁጥር (1-{MAX_PRESET_CARDS})** ይምረጡ። {CARD_COST} Br ከሂሳብዎ ይቀነሳል።\n"
+        f"2. {MIN_REAL_PLAYERS} የሰው ተጫዋቾች ካልተሟሉ የኮምፒውተር ተጫዋቾች (Bots) ይጨመራሉ።\n"
+        f"3. ቁጥር ሲጠራ ካርድዎ ላይ ካለ፣ **አረንጓዴ (🟢)** ይሆናል።\n"
+        f"4. አረንጓዴውን ቁጥር **ይጫኑ (Tap)**። ሲጫኑ **ምልክት (✅)** ያደርጋል። (Marked numbers are displayed in **white text**).\n"
         "5. በአግድም፣ በአቀባዊ ወይም በሰያፍ (Row, Column, Diagonal) **5 ቁጥሮችን** ሙሉ ምልክት (✅) ያድርጉ።\n"
         "6. 5 ቁጥሮችን ሲያሟሉ **'🚨 CALL BINGO! 🚨'** የሚለውን ቁልፍ ይጫኑ።\n"
-        "7. ትክክል ከሆኑ **{WINNER_PAYOUT_AMOUNT} Br** መሰረታዊ ሽልማት እና የጃክፖት ድርሻ ያሸንፋሉ!\n"
-        "_ማሳሰቢያ: የሰው ተጫዋቾች ከ 5 በታች ከሆኑ፣ የኮምፒውተር ተጫዋች ሊያሸንፍ ይችላል።_" ,
+        f"7. ትክክል ከሆኑ **{WINNER_PAYOUT_AMOUNT} Br** መሰረታዊ ሽልማት እና የጃክፖት ድርሻ ያሸንፋሉ!\n"
+        f"_ማሳሰቢያ: የሰው ተጫዋቾች ከ {MIN_REAL_PLAYERS} በታች ከሆኑ፣ የኮምፒውተር ተጫዋች ሊያሸንፍ ይችላል።_" ,
         parse_mode='Markdown'
     )
 
@@ -814,7 +856,7 @@ def main():
 
     # Command Handlers
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("balance", balance_command))
+    app.add_handler(CommandHandler("balance", balance_command)) 
     app.add_handler(CommandHandler("play", play_command))
     app.add_handler(CommandHandler("deposit", deposit_command))
     app.add_handler(CommandHandler("instructions", instructions_command))
