@@ -1,5 +1,5 @@
-# Addis (አዲስ) Bingo - V12.0: Players can browse and select 1 from 200 fixed cards.
-# Changes: Replaced the 'choose 3' mechanic with a paginated card browsing system (1-200).
+# Addis (አዲስ) Bingo - V13.0: Fixed game initiation and callback handling after card selection.
+# Fixes: Ensures the callback's game_id matches the ACTIVE_GAMES key when the game starts.
 
 import os
 import logging
@@ -36,6 +36,10 @@ COLUMNS = ['B', 'I', 'N', 'G', 'O']
 TOTAL_CARD_POOL = 200 # Total number of unique, fixed cards
 CARDS_PER_PAGE = 25   # Number of card numbers to show per browsing page
 
+# --- Game State Constants ---
+GAME_ID_PLACEHOLDER = 'PENDING_GAME' # Used in callbacks before the real game ID is assigned
+BOT_WINNER_ID = -999999999 
+
 # --- Referral Constant ---
 REFERRAL_REWARD = 10.0 
 
@@ -47,8 +51,7 @@ EMOJI_FREE = '🌟'
 
 # --- Global Game State (In-Memory) ---
 LOBBY = {} # Tracks browsing state: {user_id: {'page': int, 'main_msg_id': int, 'preview_msg_id': int}}
-ACTIVE_GAMES = {}
-BOT_WINNER_ID = -999999999 
+ACTIVE_GAMES = {} # Holds all running and pending games (PENDING key is special)
 
 # --- Database Setup (Unchanged) ---
 DB_STATUS = "Unknown"
@@ -286,6 +289,7 @@ async def refresh_all_player_cards(context: ContextTypes.DEFAULT_TYPE, game_id, 
         card = game_data['cards'][pid]
         msg_id = game_data['card_messages'][pid]
         
+        # Ensure the keyboard uses the real game_id
         new_keyboard = build_card_keyboard(card, -1, game_id, msg_id, is_selection=False)
         
         new_card_text = (
@@ -430,8 +434,10 @@ def add_computer_players(real_players: list) -> tuple:
         bots_to_add = random.randint(10, 20)
     
     for i in range(bots_to_add):
+        # Generate unique negative IDs for bots
         bot_players.append(BOT_WINNER_ID - i - 1) 
     
+    # Ensure the winner bot is included if not already
     if BOT_WINNER_ID not in bot_players:
          bot_players.append(BOT_WINNER_ID)
          
@@ -439,18 +445,26 @@ def add_computer_players(real_players: list) -> tuple:
 
 def generate_winning_sequence(game_data):
     bot_card = generate_random_card_internal()
+    # Assume winning row is the top row (row 0)
     winning_numbers = [get_card_value(bot_card, c, 0) for c in range(5)]
+    
+    # Exclude the FREE space if it somehow ended up here (N column in rand card is full)
+    winning_numbers = [num for num in winning_numbers if isinstance(num, int)]
 
     all_numbers = list(range(1, 76))
     for num in winning_numbers:
-        if isinstance(num, int) and num in all_numbers:
+        if num in all_numbers:
             all_numbers.remove(num)
             
     random.shuffle(all_numbers)
     
+    # Choose a random number from the winning set to be the final one called
     final_win_num = winning_numbers.pop(random.randrange(len(winning_numbers)))
+    
+    # Sequence: Most winning numbers + 10 random pre-calls + Final winning number + rest of numbers
     available_numbers = winning_numbers + all_numbers[:10] + [final_win_num] + all_numbers[10:]
     
+    # Pre-mark the bot's card for the winning numbers *before* the final one
     for num in winning_numbers:
         c, r = get_card_position(bot_card, num)
         if c is not None:
@@ -462,9 +476,92 @@ def generate_winning_sequence(game_data):
 
     return available_numbers
 
-# --- Game Loop (Unchanged) ---
+# --- Game ID Refresh Helper ---
+async def refresh_game_id_in_card_keyboards(context: ContextTypes.DEFAULT_TYPE, new_game_id: str, players_data: dict):
+    """Updates the game_id placeholder in all player card keyboards to the real game_id."""
+    for user_id, msg_id in players_data['card_messages'].items():
+        if user_id < 0: continue # Skip bots
+        
+        card = players_data['cards'][user_id]
+        
+        # Build the new keyboard using the real new_game_id and the known msg_id
+        # card_id is stored in card['card_id']
+        new_keyboard = build_card_keyboard(card, card.get('card_id', -1), new_game_id, msg_id, is_selection=False)
+        
+        try:
+            # Edit the message to replace the placeholder game_id with the real one
+            await context.bot.edit_message_reply_markup(
+                chat_id=user_id,
+                message_id=msg_id,
+                reply_markup=new_keyboard
+            )
+            logger.info(f"Refreshed keyboard for user {user_id} with new game_id: {new_game_id}")
+        except Exception as e:
+            logger.error(f"Error refreshing game ID for {user_id} in msg {msg_id}: {e}")
+
+# --- Game Start Logic Helper ---
+async def handle_player_join_and_game_start(context: ContextTypes.DEFAULT_TYPE, user_id, selected_card, final_msg_id):
+    """Centralizes the logic for checking for enough players and starting the game."""
+    # 1. Collect pending players
+    pending_players = [pid for pid in ACTIVE_GAMES.get(GAME_ID_PLACEHOLDER, {}).get('players', [])] + [user_id]
+
+    # 2. Update PENDING game state (using the placeholder key)
+    ACTIVE_GAMES[GAME_ID_PLACEHOLDER] = {
+        'players': pending_players,
+        'cards': {
+           **ACTIVE_GAMES.get(GAME_ID_PLACEHOLDER, {}).get('cards', {}),
+           user_id: selected_card
+        },
+        'card_messages': {
+           **ACTIVE_GAMES.get(GAME_ID_PLACEHOLDER, {}).get('card_messages', {}),
+           user_id: final_msg_id
+        },
+        'status': 'pending'
+    }
+
+    if len(pending_players) >= MIN_REAL_PLAYERS:
+        # --- GAME START: Enough Real Players ---
+        real_game_id = f"G{int(time.time() * 1000)}"
+        game_data_to_start = ACTIVE_GAMES.pop(GAME_ID_PLACEHOLDER)
+        
+        ACTIVE_GAMES[real_game_id] = game_data_to_start
+        ACTIVE_GAMES[real_game_id]['called'] = []
+        
+        # CRITICAL: Update keyboards with the REAL game ID
+        await refresh_game_id_in_card_keyboards(context, real_game_id, ACTIVE_GAMES[real_game_id])
+        
+        asyncio.create_task(run_game_loop(context, real_game_id, pending_players))
+        
+    elif len(pending_players) == 1:
+        await context.bot.send_message(user_id, "⏳ **ተራ ይጠብቁ (Awaiting players)...**\n\nሌሎች ተጫዋቾችን እየጠበቅን ነው። በቂ ተጫዋች ካልተገኘ **በ10 ሰከንዶች** ውስጥ የኮምፒውተር ተጫዋቾች ተቀላቅለው ጨዋታው ይጀመራል!")
+        await asyncio.sleep(10) 
+        
+        # Check if still pending, and no new players joined (i.e., size hasn't changed)
+        if GAME_ID_PLACEHOLDER in ACTIVE_GAMES and len(ACTIVE_GAMES[GAME_ID_PLACEHOLDER]['players']) == len(pending_players):
+            
+            real_game_id = f"G{int(time.time() * 1000)}"
+            game_data_to_start = ACTIVE_GAMES.pop(GAME_ID_PLACEHOLDER)
+            real_players_now = game_data_to_start['players']
+            
+            ACTIVE_GAMES[real_game_id] = game_data_to_start
+            ACTIVE_GAMES[real_game_id]['called'] = []
+            
+            # CRITICAL: Update keyboards with the REAL game ID
+            await refresh_game_id_in_card_keyboards(context, real_game_id, ACTIVE_GAMES[real_game_id])
+            
+            asyncio.create_task(run_game_loop(context, real_game_id, real_players_now))
+            
+    else:
+        await context.bot.send_message(user_id, f"✅ **{len(pending_players)}/{MIN_REAL_PLAYERS} ተጫዋቾች ተመዝግበዋል!**\n\nሌሎች ተጫዋቾች ሲመዘገቡ ወዲያውኑ ጨዋታው ይጀምራል።")
+
+# --- Game Loop (Updated to use real game ID) ---
 async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, real_players):
     import requests 
+
+    # Ensure the game is still active under its real ID
+    if game_id not in ACTIVE_GAMES:
+        logger.warning(f"Attempted to run game {game_id} but it's not in ACTIVE_GAMES.")
+        return
 
     all_players, bot_players = add_computer_players(real_players)
     is_bot_game = len(bot_players) > 0
@@ -507,6 +604,7 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, real_player
         board_message_ids[pid] = msg.message_id
     game_data['board_messages'] = board_message_ids
 
+    # Refresh cards with the first call status
     await refresh_all_player_cards(context, game_id, real_players, current_call_num=None)
 
     await asyncio.sleep(2)
@@ -610,7 +708,7 @@ async def finalize_win(context: ContextTypes.DEFAULT_TYPE, game_id: str, winner_
     
     del ACTIVE_GAMES[game_id]
 
-# --- New Card Browsing & Selection Logic ---
+# --- Card Browsing & Selection Logic (Unchanged) ---
 
 def build_card_browser_keyboard(current_page: int):
     """Generates the keyboard with card numbers for the current page."""
@@ -723,6 +821,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"⛔ በቂ ሂሳብ የለዎትም (Not enough balance).\nያስፈልጋል: {GAME_COST} Br\nአለዎት: {data.get('balance', 0)} Br")
         return
 
+    # Check if user is already in LOBBY or an ACTIVE_GAMES instance (including PENDING)
     if user_id in LOBBY or any(user_id in g['players'] for g in ACTIVE_GAMES.values()):
         await update.message.reply_text("⏳ ተራ ይጠብቁ (Already waiting or in a game).")
         return
@@ -828,11 +927,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         LOBBY.pop(user_id) # End the selection state
 
-        game_id = f"G{int(time.time() * 1000)}"
-        
+        # 1. Build the initial keyboard using the PENDING placeholder ID
         initial_card_text = get_current_call_text(None) + "\n\n**🃏 የእርስዎ ቢንጎ ካርድ (Your Bingo Card) 🃏**\n_🟢 አረንጓዴ ቁጥር ሲመጣ ይጫኑ! (Numbers are White)_"
-        
-        final_keyboard = build_card_keyboard(selected_card, card_id, game_id, 0, is_selection=False) 
+        final_keyboard = build_card_keyboard(selected_card, card_id, GAME_ID_PLACEHOLDER, 0, is_selection=False) 
 
         final_msg = await context.bot.send_message(
             user_id, 
@@ -841,8 +938,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode='Markdown'
         )
         
-        # Update the callback data with the correct message ID
-        final_keyboard_updated = build_card_keyboard(selected_card, card_id, game_id, final_msg.message_id, is_selection=False)
+        # 2. Update the callback data with the correct message ID (still using placeholder)
+        final_keyboard_updated = build_card_keyboard(selected_card, card_id, GAME_ID_PLACEHOLDER, final_msg.message_id, is_selection=False)
         try:
             await context.bot.edit_message_reply_markup(
                 chat_id=user_id,
@@ -852,48 +949,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception as e:
             logger.error(f"Error updating message reply markup after selection: {e}")
 
-
-        pending_players = [pid for pid in ACTIVE_GAMES.get('PENDING', {}).get('players', [])] + [user_id]
-        
-        ACTIVE_GAMES['PENDING'] = {
-             'players': pending_players,
-             'cards': {
-                **ACTIVE_GAMES.get('PENDING', {}).get('cards', {}),
-                user_id: selected_card
-             },
-             'card_messages': {
-                **ACTIVE_GAMES.get('PENDING', {}).get('card_messages', {}),
-                user_id: final_msg.message_id
-             }
-        }
-        
-        
-        if len(pending_players) >= MIN_REAL_PLAYERS:
-            game_data_to_start = ACTIVE_GAMES.pop('PENDING')
-            ACTIVE_GAMES[game_id] = game_data_to_start
-            ACTIVE_GAMES[game_id]['called'] = []
-            asyncio.create_task(run_game_loop(context, game_id, pending_players))
-            
-        elif len(pending_players) == 1:
-            await context.bot.send_message(user_id, "⏳ **ተራ ይጠብቁ (Awaiting players)...**\n\nሌሎች ተጫዋቾችን እየጠበቅን ነው። በቂ ተጫዋች ካልተገኘ **በ10 ሰከንዶች** ውስጥ የኮምፒውተር ተጫዋቾች ተቀላቅለው ጨዋታው ይጀመራል!")
-            await asyncio.sleep(10) 
-            
-            if game_id not in ACTIVE_GAMES and 'PENDING' in ACTIVE_GAMES and len(ACTIVE_GAMES['PENDING']['players']) > 0:
-                game_data_to_start = ACTIVE_GAMES.pop('PENDING')
-                real_players_now = game_data_to_start['players']
-                
-                ACTIVE_GAMES[game_id] = game_data_to_start
-                ACTIVE_GAMES[game_id]['called'] = []
-                
-                asyncio.create_task(run_game_loop(context, game_id, real_players_now))
-                
-        else:
-            await context.bot.send_message(user_id, f"✅ **{len(pending_players)}/{MIN_REAL_PLAYERS} ተጫዋቾች ተመዝግበዋል!**\n\nሌሎች ተጫዋቾች ሲመዘገቡ ወዲያውኑ ጨዋታው ይጀምራል።")
+        # 3. Handle joining and starting the game
+        await handle_player_join_and_game_start(context, user_id, selected_card, final_msg.message_id)
 
         return
 
-    # --- Game Play Logic (Unchanged) ---
+    # --- Game Play Logic ---
     if action in ('MARK', 'BINGO'):
+        # CRITICAL FIX: Block actions if the game is still pending
+        if game_id == GAME_ID_PLACEHOLDER:
+            await query.answer("⌛ ጨዋታው እስኪጀምር ድረስ ይጠብቁ። (Wait until the game starts.)")
+            return
+            
         if game_id not in ACTIVE_GAMES or user_id not in ACTIVE_GAMES[game_id]['players']:
             await query.answer("This game has ended or you are not a participant.")
             return
