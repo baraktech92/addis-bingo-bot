@@ -1,5 +1,5 @@
-# Addis (አዲስ) Bingo - V9.3: Implements Dedicated Current Call Display
-# Moves the prominent Current Call display into the Card message (Message 2) for better UX.
+# Addis (አዲስ) Bingo - V9.5: BINGO Button Debugging
+# Adds robust error handling to the BINGO callback action to ensure feedback is given.
 
 import os
 import logging
@@ -25,14 +25,14 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-GAME_COST = 20       # V9.2: Increased to 20 Br
+GAME_COST = 20       # Cost per game in Birr
 PRIZE_AMOUNT = 40 
 MIN_PLAYERS = 1      # *** CHANGE THIS TO 5 BEFORE GOING LIVE! ***
-CALL_DELAY = 2.03    # V9.2: Set to 2 seconds 30 microseconds
+CALL_DELAY = 2.03    # Delay between number calls
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
 
 # --- Emojis for Card State ---
-EMOJI_UNMARKED = '🔴' # V9.2: Red for uncalled
+EMOJI_UNMARKED = '🔴' # Red for uncalled
 EMOJI_CALLED = '🟢'   # Called, not marked
 EMOJI_MARKED = '✅'   # Called, and marked by player
 EMOJI_FREE = '🌟'     # Free space
@@ -82,6 +82,7 @@ def create_or_update_user(user_id: int, username: str, first_name: str):
         })
 
 def update_balance(user_id: int, amount: float):
+    # amount is positive for deposit, negative for withdrawal/game cost
     if not db: return
     db.collection(USERS_COLLECTION).document(str(user_id)).update({
         'balance': firestore.Increment(amount)
@@ -163,7 +164,7 @@ async def refresh_all_player_cards(context: ContextTypes.DEFAULT_TYPE, game_id, 
         new_keyboard = build_card_keyboard(card, -1, game_id, msg_id, is_selection=False)
         
         new_card_text = (
-            f"{current_call_text}\n\n" # V9.3: Current call is now HERE
+            f"{current_call_text}\n\n" # Current call is now HERE
             f"**🃏 የእርስዎ ቢንጎ ካርድ (Your Bingo Card) 🃏**\n"
             f"_አረንጓዴ ቁጥር ሲመጣ ይጫኑ!_"
         )
@@ -251,7 +252,7 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
     
     # 1. Send the initial Called Numbers Board (for editing) - HISTORY ONLY
     board_message_ids = {}
-    board_msg_text = "**🎰 የተጠሩ ቁጥሮች (Called Numbers Board) 🎰**\n\n_ይህ የጥሪ ታሪክ ነው (This is the call history log)._"
+    board_msg_text = "**🎰 የተጠሩ ቁጥሮች ታሪክ (Called Numbers History) 🎰**\n\n_ይህ የጥሪ ታሪክ ነው (This is the call history log)._"
     for pid in players:
         msg = await context.bot.send_message(pid, board_msg_text, parse_mode='Markdown')
         board_message_ids[pid] = msg.message_id
@@ -283,7 +284,7 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
         history_board = format_called_numbers_compact(called) 
         
         new_board_text = (
-            f"**🎰 የተጠሩ ቁጥሮች (Called Numbers Board) 🎰**\n"
+            f"**🎰 የተጠሩ ቁጥሮች ታሪክ (Called Numbers History) 🎰**\n"
             f"{history_board}"
         )
         
@@ -298,7 +299,7 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
             except Exception as e:
                  logger.debug(f"Error editing board message for {pid}: {e}")
         
-        # V9.2: Use the requested fast delay
+        # Use the requested fast delay
         await asyncio.sleep(CALL_DELAY) 
     
     if game_id in ACTIVE_GAMES:
@@ -424,6 +425,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("⏳ ተራ ይጠብቁ (Already waiting or in a game).")
         return
 
+    # Deduct game cost (negative amount)
     update_balance(user_id, -GAME_COST)
     
     card_options = [generate_card() for i in range(3)]
@@ -544,7 +546,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Get the current call number to correctly refresh the card text
         current_call_num = game_data['called'][-1] if game_data['called'] else None
         
-        # V9.3: Refresh the card text and keyboard together
+        # Refresh the card text and keyboard together
         current_call_text = get_current_call_text(current_call_num)
         new_card_text = (
             f"{current_call_text}\n\n"
@@ -568,52 +570,77 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.answer("Error updating card. Is the message too old?")
 
     elif action == 'BINGO':
-        if check_win(card):
-            # Win Logic
-            game_data['status'] = 'finished'
-            update_balance(user_id, PRIZE_AMOUNT)
-            
-            winner_name = query.from_user.first_name
-            win_msg = f"🎉 BINGO!!! 🎉\n\nአሸናፊ (Winner): **{winner_name}**\n**Prize: {PRIZE_AMOUNT} Br Added!**"
-            
-            for pid in game_data['players']:
+        try:
+            if check_win(card):
+                # Win Logic
+                game_data['status'] = 'finished'
+                update_balance(user_id, PRIZE_AMOUNT) # Prize is added (positive amount)
+                
+                winner_name = query.from_user.first_name
+                win_msg = f"🎉 BINGO!!! 🎉\n\nአሸናፊ (Winner): **{winner_name}**\n**Prize: {PRIZE_AMOUNT} Br Added!**"
+                
+                for pid in game_data['players']:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=pid,
+                            message_id=game_data['board_messages'][pid],
+                            text=f"**🎉 WINNER: {winner_name} 🎉**\n\n**The Game has ended!**",
+                            reply_markup=None,
+                            parse_mode='Markdown'
+                        )
+                    except: pass
+
+                    await context.bot.send_message(pid, win_msg, parse_mode='Markdown')
+                
                 try:
-                    await context.bot.edit_message_text(
-                        chat_id=pid,
-                        message_id=game_data['board_messages'][pid],
-                        text=f"**🎉 WINNER: {winner_name} 🎉**\n\n**The Game has ended!**",
+                     await query.edit_message_text(
+                        text=f"**🎉 WINNER! Game Over. 🎉**\nPrize: {PRIZE_AMOUNT} Br",
                         reply_markup=None,
                         parse_mode='Markdown'
                     )
                 except: pass
+                
+                del ACTIVE_GAMES[game_id]
+                await query.answer("BINGO! You Win! 🎉")
+            else:
+                # Loss Logic (False Bingo)
+                await query.answer("❌ ውሸት! (False Bingo). Keep playing. ❌")
+        
+        except Exception as e:
+            logger.error(f"FATAL ERROR in BINGO action for user {user_id}, game {game_id}: {e}")
+            await query.answer("🚨 An internal error occurred. Try again. 🚨")
 
-                await context.bot.send_message(pid, win_msg, parse_mode='Markdown')
-            
-            try:
-                 await query.edit_message_text(
-                    text=f"**🎉 WINNER! Game Over. 🎉**\nPrize: {PRIZE_AMOUNT} Br",
-                    reply_markup=None,
-                    parse_mode='Markdown'
-                )
-            except: pass
-            
-            del ACTIVE_GAMES[game_id]
-            await query.answer("BINGO! You Win! 🎉")
-        else:
-            # Loss Logic (V9.2: Clear Amharic/English Feedback)
-            await query.answer("❌ ውሸት! (False Bingo). Keep playing. ❌")
 
-# --- Admin ---
+# --- Admin Commands ---
 async def approve_deposit_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Admin command to ADD balance after a deposit is verified.
     if ADMIN_USER_ID is None or update.effective_user.id != ADMIN_USER_ID: return
     try:
         tid = int(context.args[0])
         amt = float(context.args[1])
-        update_balance(tid, amt)
-        await update.message.reply_text(f"✅ Approved {amt} to {tid}")
-        await context.bot.send_message(tid, f"Deposit Approved: +{amt} Br")
+        update_balance(tid, amt) # Deposit is positive
+        await update.message.reply_text(f"✅ Approved deposit of {amt} Br to User ID {tid}")
+        await context.bot.send_message(tid, f"💰 የገንዘብ ማስገቢያዎ ጸድቋል! +{amt} Br ወደ ሂሳብዎ ገብቷል።")
     except:
-        await update.message.reply_text("Error. Usage: /ap_dep [id] [amt] (Both must be numbers)")
+        await update.message.reply_text("⛔ Error. Usage: /ap_dep [user_id] [amount] (Both must be numbers)")
+
+async def approve_withdrawal_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Admin command to DEDUCT balance after a withdrawal is paid out manually.
+    if ADMIN_USER_ID is None or update.effective_user.id != ADMIN_USER_ID: return
+    try:
+        tid = int(context.args[0])
+        amt = float(context.args[1])
+        
+        if get_user_data(tid).get('balance', 0) < amt:
+            await update.message.reply_text(f"⛔ User ID {tid} has insufficient balance ({get_user_data(tid).get('balance', 0)} Br) for {amt} Br withdrawal.")
+            return
+
+        update_balance(tid, -amt) # Withdrawal is negative
+        await update.message.reply_text(f"✅ Approved withdrawal of {amt} Br from User ID {tid}")
+        await context.bot.send_message(tid, f"💸 ገንዘብ የማውጣት ጥያቄዎ ጸድቋል! -{amt} Br ከሂሳብዎ ተቀንሶ ተልኳል።")
+    except:
+        await update.message.reply_text("⛔ Error. Usage: /ap_wit [user_id] [amount] (Both must be numbers)")
+
 
 # --- Main ---
 def main():
@@ -626,7 +653,10 @@ def main():
     app.add_handler(CommandHandler("withdraw", withdraw_command))
     app.add_handler(CommandHandler("play", play_command))
     app.add_handler(CommandHandler("instructions", instructions_command))
+    
+    # Admin Handlers
     app.add_handler(CommandHandler("ap_dep", approve_deposit_admin))
+    app.add_handler(CommandHandler("ap_wit", approve_withdrawal_admin)) 
     
     app.add_handler(CallbackQueryHandler(handle_callback))
 
