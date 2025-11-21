@@ -1,5 +1,5 @@
-# Addis (አዲስ) Bingo - V9.1: Implements Compact UX Flow
-# Optimizes the Called Numbers Board to use less vertical space, ensuring the Card and Board are visible together.
+# Addis (አዲስ) Bingo - V9.3: Implements Dedicated Current Call Display
+# Moves the prominent Current Call display into the Card message (Message 2) for better UX.
 
 import os
 import logging
@@ -25,13 +25,14 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-GAME_COST = 10
+GAME_COST = 20       # V9.2: Increased to 20 Br
 PRIZE_AMOUNT = 40 
-MIN_PLAYERS = 1 # *** CHANGE THIS TO 5 BEFORE GOING LIVE! ***
+MIN_PLAYERS = 1      # *** CHANGE THIS TO 5 BEFORE GOING LIVE! ***
+CALL_DELAY = 2.03    # V9.2: Set to 2 seconds 30 microseconds
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
 
 # --- Emojis for Card State ---
-EMOJI_UNMARKED = '🔵' # Not called, not marked
+EMOJI_UNMARKED = '🔴' # V9.2: Red for uncalled
 EMOJI_CALLED = '🟢'   # Called, not marked
 EMOJI_MARKED = '✅'   # Called, and marked by player
 EMOJI_FREE = '🌟'     # Free space
@@ -124,15 +125,14 @@ def get_card_position(card, value):
     return None, None
 
 def format_called_numbers_compact(called_numbers):
-    # V9.1: Compact, row-based display
+    # V9.3: Only history, no current call
     if not called_numbers:
         return "--- ቁጥሮች ገና አልተጠሩም (No numbers called yet) ---"
     
-    # Group numbers by column letter
     grouped = {col: [] for col in COLUMNS}
     for num in called_numbers:
         col_letter = next(col for col, (start, end) in [('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), ('G', (46, 60)), ('O', (61, 75))] if start <= num <= end)
-        grouped[col_letter].append(str(num).zfill(2)) # zfill(2) ensures '9' is '09'
+        grouped[col_letter].append(str(num).zfill(2))
         
     output = []
     for col in COLUMNS:
@@ -141,27 +141,47 @@ def format_called_numbers_compact(called_numbers):
     
     return "\n".join(output)
 
+# V9.3: Extracts the current call text for the card message
+def get_current_call_text(num):
+    if num is None:
+        return "**📣 በመጠባበቅ ላይ... (Awaiting first call)**"
+    col_letter = next(col for col, (start, end) in [('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), ('G', (46, 60)), ('O', (61, 75))] if start <= num <= end)
+    
+    # Use large, bold formatting for prominence
+    return f"**📣 አሁን የተጠራ (CURRENT CALL):**\n#️⃣ **{col_letter}-{num}**"
 
-async def refresh_all_player_cards(context: ContextTypes.DEFAULT_TYPE, game_id, players):
+
+async def refresh_all_player_cards(context: ContextTypes.DEFAULT_TYPE, game_id, players, current_call_num=None):
     game_data = ACTIVE_GAMES[game_id]
+    
+    current_call_text = get_current_call_text(current_call_num)
     
     for pid in players:
         card = game_data['cards'][pid]
         msg_id = game_data['card_messages'][pid]
         
         new_keyboard = build_card_keyboard(card, -1, game_id, msg_id, is_selection=False)
+        
+        new_card_text = (
+            f"{current_call_text}\n\n" # V9.3: Current call is now HERE
+            f"**🃏 የእርስዎ ቢንጎ ካርድ (Your Bingo Card) 🃏**\n"
+            f"_አረንጓዴ ቁጥር ሲመጣ ይጫኑ!_"
+        )
+        
         try:
-            await context.bot.edit_message_reply_markup(
+            await context.bot.edit_message_text(
                 chat_id=pid,
                 message_id=msg_id,
-                reply_markup=new_keyboard
+                text=new_card_text,
+                reply_markup=new_keyboard,
+                parse_mode='Markdown'
             )
         except Exception as e:
             logger.debug(f"Error refreshing card for {pid}: {e}")
 
-# Note: The card is slightly compacted for better mobile view
 def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selection=True):
     keyboard = []
+    # Use just the letter for the header to reduce height
     header = [InlineKeyboardButton(col, callback_data=f"ignore_header") for col in COLUMNS]
     keyboard.append(header)
     
@@ -186,12 +206,12 @@ def build_card_keyboard(card, card_index, game_id=None, msg_id=None, is_selectio
                 label = f"{EMOJI_UNMARKED}{value}" 
                 callback_data = f"ignore_not_called" 
             
-            btn_label = str(value) if is_selection else label 
-
+            # Use value only for selection buttons for compactness
             if is_selection:
-                row.append(InlineKeyboardButton(btn_label, callback_data=f"ignore_select_card_num"))
+                row.append(InlineKeyboardButton(str(value), callback_data=f"ignore_select_card_num"))
             else:
-                row.append(InlineKeyboardButton(btn_label, callback_data=callback_data))
+                # Use emoji + value for game buttons
+                row.append(InlineKeyboardButton(label, callback_data=callback_data))
                 
         keyboard.append(row)
     
@@ -229,13 +249,16 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
     ACTIVE_GAMES[game_id]['status'] = 'running'
     game_data = ACTIVE_GAMES[game_id]
     
-    # 1. Send the initial Called Numbers Board (for editing)
+    # 1. Send the initial Called Numbers Board (for editing) - HISTORY ONLY
     board_message_ids = {}
-    board_msg_text = "**🎰 የተጠሩ ቁጥሮች (Called Numbers Board) 🎰**\n\n_አረንጓዴው ቁጥር ሲመጣ በካርድዎ ላይ ይጫኑ!_"
+    board_msg_text = "**🎰 የተጠሩ ቁጥሮች (Called Numbers Board) 🎰**\n\n_ይህ የጥሪ ታሪክ ነው (This is the call history log)._"
     for pid in players:
         msg = await context.bot.send_message(pid, board_msg_text, parse_mode='Markdown')
         board_message_ids[pid] = msg.message_id
     game_data['board_messages'] = board_message_ids
+
+    # 2. Initial card refresh (to set the 'Awaiting first call' text)
+    await refresh_all_player_cards(context, game_id, players, current_call_num=None)
 
     await asyncio.sleep(2)
 
@@ -246,28 +269,22 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
         called.append(num)
         game_data['called'] = called
         
-        # 2. Update all cards with the new 'called' number for the green highlight
+        # 3. Update all cards with the new 'called' number for the green highlight
         for pid in players:
             card = game_data['cards'][pid]
             c, r = get_card_position(card, num)
             if c is not None and r is not None:
                 card['called'][(c, r)] = True
 
-        # Refresh all player cards to show the green highlight
-        await refresh_all_player_cards(context, game_id, players)
+        # Refresh all player cards to show the green highlight AND the new call text
+        await refresh_all_player_cards(context, game_id, players, current_call_num=num)
 
-        # 3. Update the single Calling Board message (V9.1 COMPACT LOGIC)
-        col_letter = next(col for col, (start, end) in [('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), ('G', (46, 60)), ('O', (61, 75))] if start <= num <= end)
-        
-        # Format the history board compactly
-        history_board = format_called_numbers_compact(called[:-1]) 
-        
-        current_call = f"\n\n**📣 አሁን የተጠራ (CURRENT CALL): {col_letter}-{num}**"
+        # 4. Update the Calling Board message (HISTORY ONLY)
+        history_board = format_called_numbers_compact(called) 
         
         new_board_text = (
             f"**🎰 የተጠሩ ቁጥሮች (Called Numbers Board) 🎰**\n"
             f"{history_board}"
-            f"{current_call}"
         )
         
         for pid in players:
@@ -281,7 +298,8 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
             except Exception as e:
                  logger.debug(f"Error editing board message for {pid}: {e}")
         
-        await asyncio.sleep(8) 
+        # V9.2: Use the requested fast delay
+        await asyncio.sleep(CALL_DELAY) 
     
     if game_id in ACTIVE_GAMES:
         for pid in players:
@@ -294,18 +312,19 @@ async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players):
 async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = (
         "**📜 የመጫወቻ ህጎች (Game Rules) 📜**\n\n"
-        "1. **ክፍያ (Cost):** እያንዳንዱ ጨዋታ ለመጫወት **10 Br** ያስከፍላል።\n"
+        f"1. **ክፍያ (Cost):** እያንዳንዱ ጨዋታ ለመጫወት **{GAME_COST} Br** ያስከፍላል።\n"
         "2. **አሸናፊ (Winner):** 5 ተጫዋቾች ሲመዘገቡ ጨዋታው ይጀምራል (Testing: 1 ተጫዋች).\n"
-        "3. **ሽልማት (Prize):** ያሸነፉ ተጫዋቾች **40 Br** ወዲያውኑ ወደ ሂሳባቸው ይገባል!\n\n"
+        f"3. **ሽልማት (Prize):** ያሸነፉ ተጫዋቾች **{PRIZE_AMOUNT} Br** ወዲያውኑ ወደ ሂሳባቸው ይገባል!\n\n"
         
         "**🕹️ እንዴት እንጫወታለን? (How to Play) 🕹️**\n"
-        "1. **/play** ይጫኑ እና 10 Br ይከፍላሉ።\n"
+        "1. **/play** ይጫኑ እና የጨዋታውን ዋጋ ይከፍላሉ።\n"
         "2. **3 የተለያዩ ካርዶች** ቀርበውልዎታል፤ የመረጡትን **'Select This'** የሚለውን ይጫኑ።\n"
-        "3. **የተጠሩ ቁጥሮች ቦርድ (Called Numbers Board):**\n"
-        "   - ይህ ቦርድ ከካርድዎ በላይ ይታያል እና ያለማቋረጥ ይዘመናል።\n"
-        "   - **🟢 አረንጓዴ ቁጥር (Green Button):** ይህ ቁጥር ተጠርቷል ማለት ነው።\n"
+        "3. **ጨዋታው ሲጀመር:** ሁለት መልዕክቶች ይመጣሉ:\n"
+        "   - **የላይኛው (Top):** የተጠሩ ቁጥሮች ታሪክ (Call History Log)።\n"
+        "   - **የታችኛው (Bottom):** የእርስዎ ቢንጎ ካርድ እና **አሁን የተጠራው ቁጥር** (Current Call)።\n"
+        "   - **🟢 አረንጓዴ ቁጥር (Green Button):** ይህ ቁጥር አሁን ተጠርቷል ማለት ነው።\n"
         "   - **✅ ተጭነው ምልክት ያድርጉ (Tap to Mark):** ቁጥሩን በካርድዎ ላይ ምልክት ለማድረግ አረንጓዴውን ቁጥር ይጫኑ። ወደ **✅** ይቀየራል።\n"
-        "4. **ቢንጎ (BINGO):** 5 ምልክት የተደረገባቸው ቁጥሮች (✅) በአንድ ቀጥተኛ መስመር (አግድም፣ ቁመታዊ፣ ወይም ዲያጎናል) ሲገጥሙ:\n"
+        "4. **ቢንጎ (BINGO):** 5 ምልክት የተደረገባቸው ቁጥሮች (✅) በአንድ ቀጥተኛ መስመር ሲገጥሙ:\n"
         "   - **🚨 CALL BINGO! 🚨** የሚለውን ቁልፍ ይጫኑ።\n"
         
         "**እድለኛ ይሁኑ! (Good Luck!)**"
@@ -357,10 +376,11 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     message = (
         f"**🏦 የገንዘብ ማስገቢያ (Deposit Instructions) 🏦**\n\n"
-        f"1. Telebirr ቁጥር: **{telebirr_number}** ይጠቀሙ።\n"
-        f"2. የእርስዎ መለያ ቁጥር (Telegram ID):\n"
+        f"1. ዝቅተኛ የማስገቢያ መጠን: **50 Br** (Minimum Deposit: 50 Br). 👈\n"
+        f"2. Telebirr ቁጥር: **{telebirr_number}** ይጠቀሙ።\n"
+        f"3. የእርስዎ መለያ ቁጥር (Telegram ID):\n"
         f"   **{user_id}**\n\n"
-        f"3. የላኩበትን ደረሰኝ (Screenshot) እና **ID ቁጥርዎን** ወዲያውኑ ለኛ ይላኩ:\n"
+        f"4. የላኩበትን ደረሰኝ (Screenshot) እና **ID ቁጥርዎን** ወዲያውኑ ለኛ ይላኩ:\n"
         f"{link_message}\n\n"
         f"_ገንዘብዎ በአንድ ደቂቃ ውስጥ ወደ ሂሳብዎ ይገባል!_"
     )
@@ -369,7 +389,28 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("ገንዘብ ለማውጣት ለአድሚን መልእክት ይላኩ።")
+    user_id = update.effective_user.id
+    contact_info = ADMIN_USERNAME if ADMIN_USERNAME else str(ADMIN_USER_ID)
+    
+    if ADMIN_USERNAME and ADMIN_USERNAME.startswith('@'):
+        link_name = f"Admin ({ADMIN_USERNAME})"
+        link_message = f"[Click here to start a chat with {link_name}](https://t.me/{ADMIN_USERNAME.lstrip('@')})"
+    else:
+        link_message = f"Contact Admin: {contact_info}"
+
+    message = (
+        f"**💸 ገንዘብ የማውጣት ጥያቄ (Withdrawal Request) 💸**\n\n"
+        f"1. በመጀመሪያ ቀሪ ሂሳብዎን በ /balance ያረጋግጡ።\n"
+        f"2. ለማውጣት የሚፈልጉትን መጠንና የሚፈልጉትን የመክፈያ ዘዴ (ለምሳሌ: Telebirr) በማስገባት ለአድሚን መልእክት ይላኩ።\n"
+        f"   - የእርስዎ ID ቁጥር: **{user_id}**\n"
+        f"   - የሚፈልጉት መጠን (Amount):\n"
+        f"   - የመክፈያ ዘዴ (Payment Method): \n\n"
+        f"3. የአድሚን አድራሻ:\n"
+        f"{link_message}\n\n"
+        f"_ሂሳብዎ በፍጥነት ተረጋግጦ ይላክልዎታል!_"
+    )
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -393,7 +434,6 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for i, card in enumerate(card_options):
         keyboard = build_card_keyboard(card, i, is_selection=True)
         
-        # V9.1: Compact display of card numbers for selection
         card_layout_text = f"**{COLUMNS[0]}** **{COLUMNS[1]}** **{COLUMNS[2]}** **{COLUMNS[3]}** **{COLUMNS[4]}**\n"
         for r in range(5):
             row_numbers = [str(get_card_value(card, c, r)).center(3) for c in range(5)]
@@ -422,7 +462,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data.split('|')
     action = data[0]
 
-    # --- Card Selection Phase ---
     if action == 'SELECT':
         if user_id not in LOBBY or LOBBY[user_id]['status'] != 'selecting_card':
             await query.answer("Invalid card selection or session expired.")
@@ -449,11 +488,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         game_id = f"G{random.randint(1000,9999)}"
         
+        # Initial text for the card message before first call
+        initial_card_text = get_current_call_text(None) + "\n\n**🃏 የእርስዎ ቢንጎ ካርድ (Your Bingo Card) 🃏**\n_አረንጓዴ ቁጥር ሲመጣ ይጫኑ!_"
+        
         final_keyboard = build_card_keyboard(selected_card, card_index, game_id, query.message.message_id, is_selection=False)
 
         final_msg = await context.bot.send_message(
             user_id, 
-            "**🃏 የእርስዎ ቢንጎ ካርድ (Your Bingo Card) 🃏**\n\n_አረንጓዴ ቁጥር ሲመጣ ይጫኑ!_", 
+            initial_card_text, 
             reply_markup=final_keyboard, 
             parse_mode='Markdown'
         )
@@ -499,18 +541,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         card['marked'][pos] = not is_already_marked
         
+        # Get the current call number to correctly refresh the card text
+        current_call_num = game_data['called'][-1] if game_data['called'] else None
+        
+        # V9.3: Refresh the card text and keyboard together
+        current_call_text = get_current_call_text(current_call_num)
+        new_card_text = (
+            f"{current_call_text}\n\n"
+            f"**🃏 የእርስዎ ቢንጎ ካርድ (Your Bingo Card) 🃏**\n"
+            f"_አረንጓዴ ቁጥር ሲመጣ ይጫኑ!_"
+        )
+        
         new_keyboard = build_card_keyboard(card, -1, game_id, msg_id, is_selection=False)
         
         try:
-            await query.edit_message_reply_markup(reply_markup=new_keyboard)
-            await query.answer(f"Number {value} {'Marked ✅' if card['marked'][pos] else 'Unmarked 🟢'}")
+            await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=msg_id,
+                text=new_card_text,
+                reply_markup=new_keyboard,
+                parse_mode='Markdown'
+            )
+            await query.answer(f"Number {value} {'Marked ✅' if card['marked'][pos] else 'Unmarked 🔴'}")
         except Exception as e:
             logger.error(f"Error editing message reply markup: {e}")
             await query.answer("Error updating card. Is the message too old?")
 
     elif action == 'BINGO':
-        
         if check_win(card):
+            # Win Logic
             game_data['status'] = 'finished'
             update_balance(user_id, PRIZE_AMOUNT)
             
@@ -541,6 +600,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             del ACTIVE_GAMES[game_id]
             await query.answer("BINGO! You Win! 🎉")
         else:
+            # Loss Logic (V9.2: Clear Amharic/English Feedback)
             await query.answer("❌ ውሸት! (False Bingo). Keep playing. ❌")
 
 # --- Admin ---
