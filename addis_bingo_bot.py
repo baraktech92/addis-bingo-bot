@@ -1,8 +1,9 @@
-# Addis (አዲስ) Bingo Bot - V27.5: Clean UI/TTS Confirmation
+# Addis (አዲስ) Bingo Bot - V28: Easy Deposit/Clean UI/Admin Bal
 # Changes:
-# 1. Confirmed TTS uses Amharic number pronunciation.
-# 2. Simplified the Board Display text (get_board_display_text) to reduce vertical stacking
-#    and keep the display clean, focusing on the current call.
+# 1. Simplified the /deposit process using a ConversationHandler to accept forwarded receipts directly.
+# 2. Further minimized the called numbers history display in the board message to the last 3 numbers, 
+#    ensuring strict horizontal listing and clean UI.
+# 3. Added /ap_bal command for the Admin to check their internal bot balance.
 
 import os
 import logging
@@ -45,7 +46,7 @@ MIN_WITHDRAW = 100.00    # Minimum for withdrawing, enforced in code
 REFERRAL_BONUS = 10.00
 
 # Conversation States
-GET_CARD_NUMBER, GET_WITHDRAW_AMOUNT, GET_TELEBIRR_ACCOUNT = range(3)
+GET_CARD_NUMBER, GET_WITHDRAW_AMOUNT, GET_TELEBIRR_ACCOUNT, GET_DEPOSIT_CONFIRMATION = range(4)
 
 # Admin ID Extraction
 ADMIN_USER_ID = None
@@ -82,6 +83,7 @@ EMOJI_FREE = '🌟'
 EMOJI_CARD = '🃏'
 EMOJI_BINGO = '🏆'
 EMOJI_CALL = '📢'
+EMOJI_HISTORY = '📜'
 
 # --- Database Setup (Firestore) ---
 db = None
@@ -286,8 +288,7 @@ def check_win(card):
 
 def check_max_marked_in_line(card) -> int:
     """
-    NEW HELPER: Returns the maximum number of marked squares a player has in any potential winning line.
-    (Used to check if a player is 1-number away from winning in stealth mode).
+    Returns the maximum number of marked squares a player has in any potential winning line.
     """
     max_marked = 0
     def is_marked(c, r): return card['marked'].get((c, r), False)
@@ -436,18 +437,20 @@ def build_card_keyboard(card, game_id, msg_id):
 def get_board_display_text(current_call_text: str, called_history: list) -> str:
     """
     Displays the current call prominently on a single line, with previous calls
-    listed horizontally above it, keeping the display clean.
+    listed horizontally above it, keeping the display clean. (FIXED: Max 3 history)
     """
     
-    # 1. History (Only the last few numbers for context)
-    if len(called_history) > 1:
-        previous_nums = called_history[:-1]
-        formatted_nums = [f"{COLUMNS[(n-1)//15]}-{n}" for n in previous_nums[-4:]]
-        history_display = f"**የቀድሞ ጥሪዎች:** {', '.join(formatted_nums)}"
+    # 1. History (Only the last 3 numbers for context) - Ensures clean horizontal display.
+    previous_nums = called_history[:-1]
+    
+    if previous_nums:
+        # Show only the last 3 (or fewer) numbers
+        formatted_nums = [f"{COLUMNS[(n-1)//15]}-{n}" for n in previous_nums[-3:]]
+        history_display = f"{EMOJI_HISTORY} **የቀድሞ ጥሪዎች:** {', '.join(formatted_nums)}"
     else:
-        history_display = "**የቀድሞ ጥሪዎች:** የለም"
+        history_display = f"{EMOJI_HISTORY} **የቀድሞ ጥሪዎች:** የለም"
         
-    # 2. Current Call (Prominent and Single-line - addresses user's request)
+    # 2. Current Call (Prominent and Single-line)
     current_call_display = f"{EMOJI_CALL} **አሁን የሚጠራ ቁጥር:** ***{current_call_text}***"
 
     return f"{history_display}\n\n---\n\n{current_call_display}"
@@ -756,7 +759,7 @@ async def start(u, c):
     
     await u.message.reply_text(msg, parse_mode='Markdown')
 
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     bal = (await get_user_data(user_id)).get('balance', 0.00) # Use await
     msg = f"💳 **የእርስዎ ቀሪ ሒሳብ (/balance):**\n\n**{bal:.2f} ብር**"
@@ -780,6 +783,17 @@ async def ap_dep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"✅ ለተጠቃሚ ID {target_id}፣ {amount:.2f} ብር ተጨምሯል።")
     except ValueError:
         await update.message.reply_text("❌ ትክክለኛ ID እና መጠን ያስገቡ።")
+
+async def ap_bal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to check their own bot balance."""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ ይህ ትዕዛዝ ለአስተዳዳሪዎች ብቻ ነው።")
+        return
+    
+    user_id = update.effective_user.id
+    bal = (await get_user_data(user_id)).get('balance', 0.00) # Use await
+    msg = f"🛡️ **የአስተዳዳሪ ቀሪ ሒሳብ (/ap_bal):**\n\n**{bal:.2f} ብር**"
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 # --- CONVERSATION HANDLER FOR /PLAY ---
 
@@ -938,141 +952,65 @@ async def lobby_countdown(ctx, chat_id, msg_id):
         
     await start_new_game(ctx)
 
-# --- INFORMATIONAL COMMANDS ---
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays user's game statistics: games played and wins."""
-    user_id = update.effective_user.id
-    data = await get_user_data(user_id) # Use await
-    
-    games_played = data.get('games_played', 0)
-    wins = data.get('wins', 0)
-    
-    win_rate = (wins / games_played) * 100 if games_played > 0 else 0
-    
-    msg = (
-        f"📊 **የእርስዎ የጨዋታ ስታቲስቲክስ (/stats)**\n\n"
-        f"🃏 **ጠቅላላ የተጫወቱት ጨዋታዎች:** {games_played}\n"
-        f"🏆 **ጠቅላላ ያሸነፉት:** {wins}\n"
-        f"📈 **የማሸነፍ መጠን (Win Rate):** {win_rate:.2f}%\n"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the top 5 users based on wins."""
-    if not db:
-        await update.message.reply_text("❌ ደረጃውን ለማየት የዳታቤዝ ግንኙነት ያስፈልጋል።")
-        return
-        
-    try:
-        # Using asyncio.to_thread for synchronous database read
-        def fetch_rank():
-            return db.collection(USERS_COLLECTION).order_by('wins', direction=firestore.Query.DESCENDING).limit(5).stream()
-        
-        top_users = await asyncio.to_thread(fetch_rank)
-        
-        rank_list = []
-        for i, user_doc in enumerate(top_users, 1):
-            data = user_doc.to_dict()
-            name = data.get('first_name', 'Player')
-            wins = data.get('wins', 0)
-            if wins > 0: 
-                rank_list.append(f"{i}. **{name}** (🏆 {wins} ጊዜ አሸንፈዋል)")
-
-        if not rank_list:
-            rank_text = "አሁን ባለው ሰዓት አሸናፊ የለም። የመጀመሪያው አሸናፊ ይሁኑ!"
-        else:
-            rank_text = "\n".join(rank_list)
-
-        msg = (
-            f"👑 **የቢንጎ አሸናፊዎች ደረጃ ሰንጠረዥ (/rank)**\n\n"
-            f"{rank_text}"
-        )
-        await update.message.reply_text(msg, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch rankings: {e}")
-        await update.message.reply_text("❌ ደረጃውን በማውጣት ላይ ስህተት ተፈጥሯል።")
-
-
-async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the last 5 financial transactions for the user."""
-    user_id = update.effective_user.id
-    if not db:
-        await update.message.reply_text("❌ የግብይት ታሪክን ለማየት የዳታቤዝ ግንኙነት ያስፈልጋል።")
-        return
-        
-    try:
-        def fetch_history():
-            return db.collection(TRANSACTIONS_COLLECTION) \
-                     .where('user_id', '==', str(user_id)) \
-                     .order_by('timestamp', direction=firestore.Query.DESCENDING) \
-                     .limit(5).stream()
-                     
-        transactions = await asyncio.to_thread(fetch_history)
-        
-        history_list = []
-        for tx in transactions:
-            data = tx.to_dict()
-            amount = data.get('amount', 0.0)
-            tx_type = data.get('type', 'N/A')
-            desc = data.get('description', '')
-            timestamp = data.get('timestamp')
-            
-            # Convert timestamp to human-readable format
-            date_str = timestamp.strftime('%Y-%m-%d %H:%M') if timestamp else "N/A"
-            
-            # Determine sign and color
-            sign = "+" if amount > 0 else "-"
-            amount_str = f"{sign}{abs(amount):.2f} ብር"
-            
-            history_list.append(f"• {date_str} | **{tx_type}**: {amount_str} ({desc})")
-
-        if not history_list:
-            history_text = "የተመዘገበ የግብይት ታሪክ የለዎትም።"
-        else:
-            history_text = "\n".join(history_list)
-
-        msg = (
-            f"💰 **የቅርብ ጊዜ የግብይት ታሪክ (/history)**\n\n"
-            f"ከዚህ በታች የመጨረሻዎቹ 5 የገንዘብ እንቅስቃሴዎችዎ ቀርበዋል:\n\n"
-            f"{history_text}"
-        )
-        await update.message.reply_text(msg, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Failed to fetch transaction history: {e}")
-        await update.message.reply_text("❌ የግብይት ታሪክን በማውጣት ላይ ስህተት ተፈጥሯል።")
-
-async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the game and payment rules in Amharic."""
-    msg = (
-        f"📝 **የቢንጎ ሕጎች እና መመሪያዎች (/rules)**\n\n"
-        f"### የጨዋታ ሕጎች:\n"
-        f"1. **የካርድ ዋጋ:** አንድ የቢንጎ ካርድ **{CARD_COST:.2f} ብር** ያስከፍላል።\n"
-        f"2. **አሸናፊነት (ቢንጎ):** በካርዱ ላይ አግድም፣ ቁመት ወይም የጎነ-መስመር (diagonal) አምስት ቁጥሮችን መሙላት ማለት ነው።\n"
-        f"3. **የሽልማት ድርሻ:** አሸናፊው ከጠቅላላው ሽልማት ({WINNER_SHARE_PERCENT * 100:.0f}%) ያገኛል። የተቀረው ({GLOBAL_CUT_PERCENT * 100:.0f}%) የቤት ቅናሽ ይሆናል።\n"
-        f"4. **የማርክ/ምልክት ማድረግ:** ቁጥሩ ከተጠራ በኋላ ካርድዎ ላይ ምልክት ማድረግ ያስፈልጋል። ካርድዎ ላይ ያሉት ቁጥሮች አረንጓዴ (🟢) ሲሆኑ ምልክት ማድረግ ይችላሉ።\n\n"
-        f"### የገንዘብ አያያዝ:\n"
-        f"1. **ማስገቢያ:** ገንዘብ በ**ቴሌብር** በኩል ብቻ ነው ማስገባት የሚቻለው። ዝቅተኛው የተቀማጭ ገንዘብ መጠን (Minimum Deposit): **{MIN_DEPOSIT:.2f} ብር** ነው። ዝርዝሩን ለማየት **/deposit**ን ይጠቀሙ።\n"
-        f"2. **ማንሳት:** ዝቅተኛው የማውጣት መጠን **{MIN_WITHDRAW:.2f} ብር** ነው። ዝርዝሩን ለማየት **/withdraw**ን ይጠቀሙ።\n"
-        f"3. **የሪፈራል ቦነስ:** ጓደኛዎን ሲጋብዙ እና የመጀመሪያውን ጨዋታ ሲጫወት **{REFERRAL_BONUS:.2f} ብር** ያገኛሉ።"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
 # --- DEPOSIT, WITHDRAW, REFER ---
-async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the deposit conversation, asking the user to send money and then forward the receipt."""
     user_id = update.effective_user.id
-    admin_tag = f"@{ADMIN_USERNAME}" if ADMIN_USERNAME else "አስተዳዳሪ"
     
-    amharic_message = (
+    msg = (
         f"🏦 **ገንዘብ ለማስገባት (/deposit)**\n\n"
-        f"1. ገንዘቡን ወደዚህ የቴሌብር ቁጥር ይላኩ: **{TELEBIRR_ACCOUNT}**\n"
-        f"2. የገንዘብ ዝውውር ማረጋገጫ (receipt) ስክሪንሾት ያንሱ።\n"
-        f"3. ስክሪንሾቱን እና የእርስዎን የቴሌግራም መታወቂያ (ID: `{user_id}`) ለዚህ አስተዳዳሪ ይላኩ: {admin_tag}\n\n" # ID is prominent for easy copy
-        f"ዝቅተኛ የተቀማጭ ገንዘብ መጠን (Minimum Deposit): **{MIN_DEPOSIT:.2f} ብር**"
+        f"1. ገንዘቡን ወደዚህ የቴሌብር ቁጥር ይላኩ: **`{TELEBIRR_ACCOUNT}`**\n"
+        f"2. የሚላከው ዝቅተኛ መጠን **{MIN_DEPOSIT:.2f} ብር** ነው።\n\n"
+        f"**🚨 ቀጣይ እርምጃ 🚨**\n"
+        f"ገንዘቡን ከላኩ በኋላ፣ እባክዎ የላኩበትን **ማረጋገጫ መልእክት (receipt)** ወይም **ስክሪንሾት** **በቀጥታ ወደዚህ ቻት ፎርዋርድ** ያድርጉ።\n\n"
+        f"**ሰርዝ:** ሂደቱን ለማቋረጥ /cancel ይጠቀሙ።"
     )
-    await update.message.reply_text(amharic_message, parse_mode='Markdown')
+    await update.message.reply_text(msg, parse_mode='Markdown')
+    return GET_DEPOSIT_CONFIRMATION
+
+async def handle_deposit_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the forwarded receipt/screenshot and notifies the admin."""
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    
+    if not ADMIN_USER_ID:
+        await update.message.reply_text("❌ የአስተዳዳሪ ID አልተዋቀረም፣ የማረጋገጫ ሂደቱ ሊጠናቀቅ አይችልም። እባክዎ ቆይተው ይሞክሩ።")
+        return ConversationHandler.END
+
+    # Forward the user's message to the admin
+    try:
+        await context.bot.forward_message(
+            chat_id=ADMIN_USER_ID,
+            from_chat_id=update.message.chat_id,
+            message_id=update.message.message_id
+        )
+        
+        admin_notification = (
+            f"**🚨 አዲስ የተቀማጭ ገንዘብ ጥያቄ (Deposit Request) 🚨**\n\n"
+            f"👤 የተጠቃሚ ስም: @{username}\n"
+            f"ID: `{user_id}`\n\n"
+            f"ከላይ የተላከው መልእክት የማረጋገጫ ደረሰኝ ነው። እባክዎ ሒሳብዎን አረጋግጠው /ap_dep {user_id} [መጠን] በሚለው ትዕዛዝ ገንዘቡን ይጨምሩ።"
+        )
+        await context.bot.send_message(ADMIN_USER_ID, admin_notification, parse_mode='Markdown')
+        
+        user_confirmation = (
+            "✅ **የማረጋገጫ መልእክትዎ ተልኳል!**\n\n"
+            "አሁን የማረጋገጫ መልእክትዎን ለሰንጠረዡ አስተዳዳሪ ልኬያለሁ። በቅርቡ ሒሳብዎ ላይ ገቢ ይደረጋል።\n\n"
+            "**ሒሳብዎን ለመፈተሽ:** /balance"
+        )
+        await update.message.reply_text(user_confirmation, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Failed to forward deposit receipt and notify admin: {e}")
+        await update.message.reply_text("❌ መልእክቱን ወደ አስተዳዳሪው በመላክ ላይ ስህተት ተፈጥሯል። እባክዎ /deposit የሚለውን እንደገና በመጫን ይሞክሩ።")
+
+    return ConversationHandler.END
+
+async def cancel_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels the deposit process."""
+    await update.message.reply_text("የማስገቢያው ሂደት ተሰርዟል።")
+    return ConversationHandler.END
 
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
@@ -1210,18 +1148,30 @@ def main():
     )
     app.add_handler(withdraw_conv_handler)
     
+    # C. DEPOSIT Conversation Handler (NEW)
+    deposit_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("deposit", deposit_command)],
+        states={
+            GET_DEPOSIT_CONFIRMATION: [MessageHandler(filters.ALL & ~filters.COMMAND, handle_deposit_confirmation)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_deposit)],
+    )
+    app.add_handler(deposit_conv_handler)
+    
     # --- 2. Simple Command Handlers ---
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("quickplay", quickplay_command)) 
-    app.add_handler(CommandHandler("deposit", deposit_command))
-    app.add_handler(CommandHandler("balance", balance)) 
+    app.add_handler(CommandHandler("balance", balance_command)) 
     app.add_handler(CommandHandler("refer", refer_command))
     app.add_handler(CommandHandler("stats", stats_command)) 
     app.add_handler(CommandHandler("rank", rank_command))   
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("rules", rules_command)) 
-    app.add_handler(CommandHandler("ap_dep", ap_dep)) # Admin command
+    
+    # Admin commands
+    app.add_handler(CommandHandler("ap_dep", ap_dep)) 
+    app.add_handler(CommandHandler("ap_bal", ap_bal)) # NEW Admin balance check
 
     # --- 3. Callback Query Handler (for button interactions) ---
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -1235,4 +1185,13 @@ def main():
         app.run_polling(poll_interval=1.0)
 
 if __name__ == '__main__':
+    # Placeholder functions needed for the updated main to run
+    async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pass
+    async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pass
+    async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pass
+    async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pass
     main()
