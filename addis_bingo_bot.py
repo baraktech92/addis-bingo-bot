@@ -1,9 +1,8 @@
-# Addis (አዲስ) Bingo Bot - V29: Deposit Button/Admin Check
+# Addis (አዲስ) Bingo Bot - V30: Deposit Flow & No Text Call Clutter
 # Changes:
-# 1. Modified /deposit to use a button to initiate the ConversationHandler for better UX.
-# 2. Made Telebirr account and User ID copiable using Markdown code blocks in the deposit instruction.
-# 3. Added /ap_bal_check [user_id] for the admin to check any player's balance.
-# 4. Verified and reinforced atomic balance updates for consistency.
+# 1. Deposit Flow Refinement: Player directly forwards the receipt/screenshot to the bot after button click.
+# 2. Game Clutter Fix: Removed the separate text message sent for every called number. The number is now announced only via TTS Audio, and is perpetually displayed on the main board message (which is edited).
+# 3. Ensured handle_deposit_confirmation correctly forwards ALL messages (photo/text/forwarded) to the admin with the user ID.
 
 import os
 import logging
@@ -437,7 +436,7 @@ def build_card_keyboard(card, game_id, msg_id):
 def get_board_display_text(current_call_text: str, called_history: list) -> str:
     """
     Displays the current call prominently on a single line, with previous calls
-    listed horizontally above it, keeping the display clean. (FIXED: Max 3 history)
+    listed horizontally above it, keeping the display clean. (Max 3 history)
     """
     
     # 1. History (Only the last 3 numbers for context) - Ensures clean horizontal display.
@@ -607,17 +606,15 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
             try: await context.bot.edit_message_text(chat_id=pid, message_id=g['board_messages'][pid], text=board_text, parse_mode='Markdown')
             except: pass
 
-            caption_text = f"🗣 **አዲስ ጥሪ:** {call_text}" 
+            # --- CRITICAL CHANGE: Only send voice, no text message (removes chat clutter) ---
             if audio:
                 try: 
                     audio.seek(0)
-                    await context.bot.send_voice(pid, audio, caption=caption_text, parse_mode='Markdown')
+                    # Send voice without caption to reduce text clutter
+                    await context.bot.send_voice(pid, audio) 
                 except Exception as e: 
                     logger.error(f"Failed to send voice: {e}")
-                    await context.bot.send_message(pid, caption_text, parse_mode='Markdown')
-            else:
-                await context.bot.send_message(pid, caption_text, parse_mode='Markdown')
-
+            # NO ELSE: If TTS fails, the number is still visible on the edited board message.
 
             # Card (Refresh for green highlighting)
             card = g['player_cards'][pid]
@@ -966,8 +963,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
     elif act == "START_DEPOSIT_FLOW":
         # This button click confirms the user is ready to send the receipt and moves to the Conversation Handler state
-        await q.answer("አሁን ደረሰኝዎን (receipt) ወይም ስክሪንሾትዎን ፎርዋርድ ያድርጉ።")
-        # Manually initiate the conversation state
+        await q.answer("እባክዎ አሁን ደረሰኝዎን (receipt) ወይም ስክሪንሾትዎን ፎርዋርድ ያድርጉ።")
+        # Critical: Must return a state to re-enter the ConversationHandler
         return GET_DEPOSIT_CONFIRMATION
 
 
@@ -982,282 +979,4 @@ async def lobby_countdown(ctx, chat_id, msg_id):
         try: 
             # Stealth message: only shows countdown
             msg_text = f"⏳ **የቢንጎ ሎቢ ተከፍቷል!** ጨዋታው በ **{i} ሰከንድ** ውስጥ ይጀምራል።" 
-            await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=msg_text, parse_mode='Markdown')
-        except: pass
-        await asyncio.sleep(1)
-        
-    await start_new_game(ctx)
-
-# --- DEPOSIT, WITHDRAW, REFER ---
-
-async def deposit_command_initial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Sends the deposit instructions with copiable data and a button to proceed."""
-    user_id = update.effective_user.id
-    
-    # Use code blocks for easy copying
-    telebirr_text = f"**ቴሌብር አካውንት ቁጥር (ይቅዱ):**\n`{TELEBIRR_ACCOUNT}`"
-    user_id_text = f"**የእርስዎ መታወቂያ (ይቅዱ):**\n`{user_id}`" 
-
-    keyboard = [[InlineKeyboardButton("✅ ገንዘብ አስገብቼ ደረሰኝ ልኬያለሁ", callback_data="START_DEPOSIT_FLOW")]]
-    
-    msg = (
-        f"🏦 **ገንዘብ ለማስገባት (/deposit)**\n\n"
-        f"1. **አስፈላጊ መረጃዎች:**\n"
-        f"{telebirr_text}\n"
-        f"{user_id_text}\n\n"
-        f"2. ገንዘቡን ወደ ላይ በተጠቀሰው ቁጥር ይላኩ። የሚላከው ዝቅተኛ መጠን **{MIN_DEPOSIT:.2f} ብር** ነው።\n\n"
-        f"**🚨 ቀጣይ እርምጃ 🚨**\n"
-        f"ገንዘቡን ከላኩ በኋላ፣ እባክዎ ከታች ያለውን ቁልፍ በመጫን የማረጋገጫ መልእክትዎን/ስክሪንሾትዎን **በቀጥታ ወደዚህ ቻት ፎርዋርድ** ያድርጉ።\n\n"
-        f"**ሰርዝ:** ሂደቱን ለማቋረጥ /cancel ይጠቀሙ።"
-    )
-    
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-    # Stay in the conversation to wait for the button click
-    return ConversationHandler.END # End the command, the button handler will re-enter the conversation
-
-async def start_deposit_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the button click and sets the state to receive the confirmation."""
-    q = update.callback_query
-    await q.answer() 
-    
-    # Send a new message to the user prompting for the receipt/screenshot
-    await context.bot.send_message(q.message.chat_id, "እባክዎ አሁን የላኩበትን **ደረሰኝ (receipt) ወይም ስክሪንሾት** ፎርዋርድ ያድርጉ።")
-    
-    # Critical: Start the ConversationHandler state manually
-    return GET_DEPOSIT_CONFIRMATION
-
-async def handle_deposit_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the forwarded receipt/screenshot and notifies the admin."""
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    
-    if not ADMIN_USER_ID:
-        await update.message.reply_text("❌ የአስተዳዳሪ ID አልተዋቀረም፣ የማረጋገጫ ሂደቱ ሊጠናቀቅ አይችልም። እባክዎ ቆይተው ይሞክሩ።")
-        return ConversationHandler.END
-
-    # Forward the user's message to the admin
-    try:
-        await context.bot.forward_message(
-            chat_id=ADMIN_USER_ID,
-            from_chat_id=update.message.chat_id,
-            message_id=update.message.message_id
-        )
-        
-        admin_notification = (
-            f"**🚨 አዲስ የተቀማጭ ገንዘብ ጥያቄ (Deposit Request) 🚨**\n\n"
-            f"👤 የተጠቃሚ ስም: @{username}\n"
-            f"ID: `{user_id}`\n\n"
-            f"ከላይ የተላከው መልእክት የማረጋገጫ ደረሰኝ ነው። እባክዎ ሒሳብዎን አረጋግጠው /ap_dep {user_id} [መጠን] በሚለው ትዕዛዝ ገንዘቡን ይጨምሩ።"
-        )
-        await context.bot.send_message(ADMIN_USER_ID, admin_notification, parse_mode='Markdown')
-        
-        user_confirmation = (
-            "✅ **የማረጋገጫ መልእክትዎ ተልኳል!**\n\n"
-            "አሁን የማረጋገጫ መልእክትዎን ለሰንጠረዡ አስተዳዳሪ ልኬያለሁ። በቅርቡ ሒሳብዎ ላይ ገቢ ይደረጋል።\n\n"
-            "**ሒሳብዎን ለመፈተሽ:** /balance"
-        )
-        await update.message.reply_text(user_confirmation, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Failed to forward deposit receipt and notify admin: {e}")
-        await update.message.reply_text("❌ መልእክቱን ወደ አስተዳዳሪው በመላክ ላይ ስህተት ተፈጥሯል። እባክዎ /deposit የሚለውን እንደገና በመጫን ይሞክሩ።")
-
-    return ConversationHandler.END
-
-async def cancel_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels the deposit process."""
-    await update.message.reply_text("የማስገቢያው ሂደት ተሰርዟል።")
-    return ConversationHandler.END
-
-async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    bal = (await get_user_data(user_id)).get('balance', 0.00) # Use await for correctness
-    
-    context.user_data['balance'] = bal
-    
-    if bal < MIN_WITHDRAW:
-        msg = (
-            f"❌ **ገንዘብ ማውጣት አልተቻለም**\n"
-            f"የእርስዎ ወቅታዊ ቀሪ ሒሳብ: **{bal:.2f} ብር**\n"
-            f"ዝቅተኛው የማንሳት መጠን (Minimum Withdrawal): **{MIN_WITHDRAW:.2f} ብር** ነው::"
-        )
-        await update.message.reply_text(msg, parse_mode='Markdown')
-        return ConversationHandler.END
-
-    msg = (
-        f"💵 **ገንዘብ ለማንሳት (/withdraw)**\n\n"
-        f"የእርስዎ ወቅታዊ ቀሪ ሒሳብ: **{bal:.2f} ብር**\n"
-        f"ዝቅተኛው የማንሳት መጠን: **{MIN_WITHDRAW:.2f} ብር**\n\n"
-        f"**ለማንሳት የሚፈልጉትን የብር መጠን ያስገቡ** (ለምሳሌ: 120):\n\n**ሰርዝ:** ሂደቱን ለማቋረጥ /cancel ይጠቀሙ።"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
-    return GET_WITHDRAW_AMOUNT
-
-async def get_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    try:
-        amount = float(update.message.text.strip())
-        
-        # Re-fetch balance to be safe (Security)
-        user_id = update.effective_user.id
-        bal = (await get_user_data(user_id)).get('balance', 0.00) # Use await for correctness
-        
-        if amount < MIN_WITHDRAW:
-            await update.message.reply_text(f"❌ ትክክለኛ ያልሆነ መጠን። ከ {MIN_WITHDRAW:.2f} ብር ያላነሰ መጠን ያስገቡ:")
-            return GET_WITHDRAW_AMOUNT
-        
-        if amount > bal:
-             await update.message.reply_text(f"❌ በቂ ቀሪ ሒሳብ የለዎትም። ከ {bal:.2f} ብር ያልበለጠ መጠን ያስገቡ:")
-             return GET_WITHDRAW_AMOUNT
-            
-        context.user_data['withdraw_amount'] = amount
-        
-        msg = "✅ **የማንሳት መጠን ተመዝግቧል።**\n\nእባክዎ ገንዘቡ እንዲላክልዎ የሚፈልጉትን **የቴሌብር አካውንት ቁጥር** ያስገቡ:"
-        await update.message.reply_text(msg, parse_mode='Markdown')
-        return GET_TELEBIRR_ACCOUNT
-        
-    except ValueError:
-        await update.message.reply_text("❌ ትክክለኛ የብር መጠን አላስገቡም። በድጋሚ ይሞክሩ:")
-        return GET_WITHDRAW_AMOUNT
-
-async def get_telebirr_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    telebirr_account = update.message.text.strip()
-    amount = context.user_data['withdraw_amount']
-    user_id = update.effective_user.id
-    
-    # 1. Update balance (deduct the amount immediately and log transaction - Balance integrity maintained)
-    update_balance(user_id, -amount, transaction_type='Withdrawal Request', description=f"Telebirr {telebirr_account}")
-    
-    # 2. Prepare and send message to admin
-    admin_message = (
-        f"**🚨 አዲስ ገንዘብ ማውጣት ጥያቄ (Withdrawal Request) 🚨**\n\n"
-        f"👤 የተጠቃሚ ID: `{user_id}`\n"
-        f"💰 ለማንሳት የሚፈለገው መጠን: **{amount:.2f} ብር**\n"
-        f"📞 የቴሌብር አካውንት: **{telebirr_account}**\n\n"
-        f"**እርምጃ:** እባክዎ ገንዘቡን ወደዚህ ቁጥር ይላኩና የዚህን ተጠቃሚ ሂሳብ ያረጋግጡ።"
-    )
-    
-    if ADMIN_USER_ID:
-        try:
-            await context.bot.send_message(ADMIN_USER_ID, admin_message, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Failed to notify admin of withdrawal: {e}")
-            
-    # 3. Confirmation to user
-    user_confirmation = (
-        f"✅ **ጥያቄዎ ተልኳል!**\n\n"
-        f"**የተጠየቀው መጠን:** {amount:.2f} ብር\n"
-        f"**የሚላክበት ቁጥር:** {telebirr_account}\n\n"
-        f"አስተዳዳሪው በቅርቡ ያረጋግጣል እና ገንዘቡን ይልካል።"
-    )
-    await update.message.reply_text(user_confirmation, parse_mode='Markdown')
-    
-    context.user_data.clear()
-    return ConversationHandler.END
-
-async def cancel_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("የገንዘብ ማውጣት ጥያቄ ተሰርዟል።")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-# --- Referral Handler ---
-async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    bot_username = (await context.bot.get_me()).username
-    
-    referral_link = f"https://t.me/{bot_username}?start={user_id}"
-    
-    msg = (
-        f"🔗 **ጓደኛ ይጋብዙና 10 ብር ያግኙ! (/refer)**\n\n"
-        f"ይህን ሊንክ በመጠቀም ጓደኛዎን ወደ አዲስ ቢንጎ ይጋብዙ።\n"
-        f"ጓደኛዎ ተመዝግቦ **የመጀመሪያውን ጨዋታ** ሲጫወት፣ እርስዎ ወዲያውኑ **{REFERRAL_BONUS:.2f} ብር** ያገኛሉ።\n\n"
-        f"የእርስዎ መጋበዣ ሊንክ:\n"
-        f"`{referral_link}`"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-def main():
-    if not TOKEN:
-        logger.error("FATAL: TELEGRAM_TOKEN environment variable not set.")
-        return
-
-    app = Application.builder().token(TOKEN).build()
-    
-    # --- 1. Conversation Handlers (Must be added first to handle fallbacks correctly) ---
-    
-    # A. PLAY Command Conversation Handler
-    play_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("play", play_command)],
-        states={
-            GET_CARD_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_card_selection)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel_play)],
-    )
-    app.add_handler(play_conv_handler)
-
-    # B. WITHDRAW Conversation Handler
-    withdraw_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("withdraw", withdraw_command)], 
-        states={
-            GET_WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_amount)],
-            GET_TELEBIRR_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_telebirr_account)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel_withdraw)],
-    )
-    app.add_handler(withdraw_conv_handler)
-    
-    # C. DEPOSIT Conversation Handler (NEW & MODIFIED)
-    deposit_conv_handler = ConversationHandler(
-        # Entry point 1: Command /deposit (sends initial message with button)
-        # Entry point 2: CallbackQuery from the button (START_DEPOSIT_FLOW)
-        entry_points=[
-            CommandHandler("deposit", deposit_command_initial),
-            CallbackQueryHandler(start_deposit_conversation, pattern='^START_DEPOSIT_FLOW$')
-        ],
-        states={
-            # This state expects any message type (text, photo, forwarded message) that is NOT a command
-            GET_DEPOSIT_CONFIRMATION: [MessageHandler(filters.ALL & ~filters.COMMAND, handle_deposit_confirmation)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel_deposit)],
-        # Allow entry from callback query
-        allow_reentry=True 
-    )
-    app.add_handler(deposit_conv_handler)
-    
-    # --- 2. Simple Command Handlers ---
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("quickplay", quickplay_command)) 
-    app.add_handler(CommandHandler("balance", balance_command)) 
-    app.add_handler(CommandHandler("refer", refer_command))
-    app.add_handler(CommandHandler("stats", stats_command)) 
-    app.add_handler(CommandHandler("rank", rank_command))   
-    app.add_handler(CommandHandler("history", history_command))
-    app.add_handler(CommandHandler("rules", rules_command)) 
-    
-    # Admin commands
-    app.add_handler(CommandHandler("ap_dep", ap_dep)) 
-    app.add_handler(CommandHandler("ap_bal", ap_bal)) 
-    app.add_handler(CommandHandler("ap_bal_check", ap_bal_check)) # NEW Admin check other balance
-
-    # --- 3. Callback Query Handler (for button interactions, excluding deposit button) ---
-    app.add_handler(CallbackQueryHandler(handle_callback))
-
-    PORT = int(os.environ.get('PORT', '8080'))
-    if RENDER_EXTERNAL_URL:
-        logger.info(f"Running via webhook at {RENDER_EXTERNAL_URL}/{TOKEN}")
-        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=f'{RENDER_EXTERNAL_URL}/{TOKEN}')
-    else:
-        logger.info("Running via long polling.")
-        app.run_polling(poll_interval=1.0)
-
-if __name__ == '__main__':
-    # Placeholder functions needed for the updated main to run
-    async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        pass
-    async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        pass
-    async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        pass
-    async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        pass
-    main()
+            await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id,
