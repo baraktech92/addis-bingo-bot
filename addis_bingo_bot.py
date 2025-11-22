@@ -1,5 +1,5 @@
-# Addis (አዲስ) Bingo Bot - V27.0: Stealth Bot Win & Display Cleanup
-# This version introduces a delay for bot wins and cleans up the board display after the game.
+# Addis (አዲስ) Bingo Bot - V27.1: Final Rules Implementation
+# This version includes the complete set of game and financial rules in the /start message.
 
 import os
 import logging
@@ -54,7 +54,7 @@ except Exception:
     pass
 
 # --- Logging ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
@@ -369,7 +369,7 @@ AMHARIC_NUMBERS = {
     71: "ሰባ አንድ", 72: "ሰባ ሁለት", 73: "ሰባ ሶስት", 74: "ሰባ አራት", 75: "ሰባ አምስት"
 }
 
-# --- UI & Text (Updated to remove history listing) ---
+# --- UI & Text (Updated to reflect new display focus) ---
 def build_card_keyboard(card, game_id, msg_id):
     keyboard = []
     # Compact Header (B I N G O)
@@ -397,18 +397,12 @@ def build_card_keyboard(card, game_id, msg_id):
 
 def get_board_display_text(current_call_text: str, called_history: list) -> str:
     """
-    CTO Rule: Displays only the current call prominently.
-    Called history list is removed to declutter the display.
+    Displays only the current call prominently, with previous calls listed above it.
     """
     
-    # 1. Current Call (Prominent)
-    current_call_display = f"{EMOJI_CALL} **አሁን የሚጠራ ቁጥር:**\n# **{current_call_text}**"
+    # 1. History (Only the last few numbers for context)
+    # The requirement is to put the called number display (history) on top.
     
-    # 2. History (Only the last few numbers for context)
-    # The requirement is to remove the full list, but keeping the last called is essential for context.
-    # We will only list the last 3-4 calls and keep the current one prominent.
-    
-    # Format the last 4 previous calls (excluding the current one which is prominent)
     if len(called_history) > 1:
         # Get the previous calls (everything except the last one)
         previous_nums = called_history[:-1]
@@ -420,7 +414,12 @@ def get_board_display_text(current_call_text: str, called_history: list) -> str:
         history_display = f"**የቀድሞ ጥሪዎች:** {', '.join(formatted_nums)}"
     else:
         history_display = "**የቀድሞ ጥሪዎች:** የለም"
+        
+    # 2. Current Call (Prominent and Larger - using triple asterisk for max emphasis)
+    # The requirement is to make the new called numbers larger in size and font
+    current_call_display = f"{EMOJI_CALL} **አሁን የሚጠራ ቁጥር:**\n# ***{current_call_text}***"
 
+    # CRITICAL: Return the history first, then the prominent current call.
     return f"{history_display}\n\n---\n\n{current_call_display}"
 
 # --- Core Game (Run loop logic modified for Stealth Bot Win and Cleanup) ---
@@ -676,7 +675,7 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
     del ACTIVE_GAMES[game_id]
 
 
-# --- Handlers (Unchanged) ---
+# --- Handlers (start function modified - ADDED DETAILED RULES) ---
 async def start(u, c): 
     # Check for referral parameter
     referrer_id = None
@@ -685,7 +684,36 @@ async def start(u, c):
     
     create_or_update_user(u.effective_user.id, u.effective_user.username, u.effective_user.first_name, referrer_id)
     
-    await u.message.reply_text("👋 ወደ አዲስ ቢንጎ እንኳን ደህና መጡ!\n\n/play - ቢንጎ ካርድ ለመግዛት (20 ብር)\n/quickplay - ፈጣን ጨዋታ\n/deposit - ገንዘብ ለማስገባት\n/balance - ሂሳብ ለማየት\n/withdraw - ገንዘብ ለማውጣት\n\nሌሎች ትዕዛዞች: /refer, /stats, /rank, /history, /rules")
+    msg = (
+        "👋 **ወደ አዲስ ቢንጎ እንኳን ደህና መጡ!**\n\n"
+        "🃏 **አዲስ የጨዋታ ህጎች:**\n"
+        f"1. **የመጫወቻ ዋጋ:** እያንዳንዱ የቢንጎ ካርድ **{CARD_COST:.2f} ብር** ነው።\n"
+        f"2. **አሸናፊነት (ቢንጎ):** በካርዱ ላይ አግድም፣ ቁመት ወይም ሰያፍ (Diagonal) አምስት ቁጥሮች ሲሞሉ ቢንጎ ይሆናል። \n\n"
+        
+        "### 📜 **ተጨማሪ መመሪያዎች:**\n"
+        
+        "#### **A. የቢንጎ ካርድ አጠቃቀም**\n"
+        "• **የቁጥር ምልክት:** ቁጥሩ **ከተጠራ** በኋላ በካርድዎ ላይ ያለውን ቁጥር በመጫን **ምልክት (✅)** ማድረግ አለብዎት።\n"
+        "• **አረንጓዴ/ቀይ:** አረንጓዴ (🟢) የተጠሩ ቁጥሮች ሲሆኑ ገና ምልክት ያላደረጉባቸው ናቸው። ቀይ (🔴) ደግሞ ገና ያልተጠሩ ቁጥሮች ናቸው።\n"
+        "• **ነጻ ቦታ (🌟):** በማዕከሉ ላይ ያለው ኮከብ (🌟) ሁልጊዜም እንደተሞላ ይቆጠራል።\n"
+        "• **ቢንጎ መጥራት:** አምስት ምልክት የተደረገባቸው ካሬዎች በተከታታይ (በየትኛውም አቅጣጫ) ሲኖሩዎት **🚨 CALL BINGO! 🚨** የሚለውን ቁልፍ ይጫኑ።\n\n"
+        
+        "#### **B. የገንዘብ ሕጎች**\n"
+        f"• **ዝቅተኛ ማስገቢያ:** ለመጫወት ገንዘብ ሲያስገቡ **ቢያንስ {MIN_DEPOSIT:.2f} ብር** መሆን አለበት። (/deposit)\n"
+        f"• **ዝቅተኛ ማውጣት:** ገንዘብ ለማውጣት በሒሳብዎ ላይ **ቢያንስ {MIN_WITHDRAW:.2f} ብር** ሊኖር ይገባል። (/withdraw)\n"
+        f"• **የሽልማት ድርሻ:** አሸናፊው ከጠቅላላው ሽልማት **{WINNER_SHARE_PERCENT * 100:.0f}%** ያገኛል።\n"
+        f"• **የሪፈራል ቦነስ:** ጓደኛዎን ሲጋብዙ **{REFERRAL_BONUS:.2f} ብር** ያገኛሉ። (/refer)\n\n"
+        
+        "👇 **ዋና ዋና ትዕዛዞች:**\n"
+        "/play - ቢንጎ ካርድ ይግዙና ጨዋታውን ይቀላቀሉ\n"
+        "/quickplay - ፈጣን የካርድ ግዢ እና ጨዋታ\n"
+        "/deposit - ገንዘብ ለማስገባት\n"
+        "/balance - የአሁኑን ቀሪ ሒሳብዎን ለማየት\n"
+        "/withdraw - ገንዘብ ለማውጣት\n"
+        "/rules - ሁሉንም መመሪያዎች በዝርዝር ለማየት"
+    )
+    
+    await u.message.reply_text(msg, parse_mode='Markdown')
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -953,7 +981,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         msg = (
             f"💰 **የቅርብ ጊዜ የግብይት ታሪክ (/history)**\n\n"
             f"ከዚህ በታች የመጨረሻዎቹ 5 የገንዘብ እንቅስቃሴዎችዎ ቀርበዋል:\n\n"
-            f"{history_text}"
+            f"{history_list}"
         )
         await update.message.reply_text(msg, parse_mode='Markdown')
         
@@ -1088,7 +1116,7 @@ async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     msg = (
         f"🔗 **ጓደኛ ይጋብዙና 10 ብር ያግኙ! (/refer)**\n\n"
         f"ይህን ሊንክ በመጠቀም ጓደኛዎን ወደ አዲስ ቢንጎ ይጋብዙ።\n"
-        f"ጓደኛዎ ተመዝግቦ **የመጀመሪያውን ተቀማጭ** ሲያደርግ፣ እርስዎ ወዲያውኑ **{REFERRAL_BONUS:.2f} ብር** ያገኛሉ።\n\n"
+        f"ጓደኛዎ ተመዝግቦ **የመጀመሪያውን ጨዋታ** ሲጫወት፣ እርስዎ ወዲያውኑ **{REFERRAL_BONUS:.2f} ብር** ያገኛሉ።\n\n"
         f"የእርስዎ መጋበዣ ሊንክ:\n"
         f"`{referral_link}`"
     )
