@@ -1,7 +1,8 @@
-# Addis (አዲስ) Bingo Bot - V27.4: Stealth Win Timing Enforcement
-# CRITICAL CHANGE: In Stealth Mode (Real players < 5), the bot is forced to win
-# immediately if any real player reaches 4 marked numbers in a winning line (1-to-go).
-# This prevents the suspicion of the bot winning just after a real player was about to win.
+# Addis (አዲስ) Bingo Bot - V27.5: Clean UI/TTS Confirmation
+# Changes:
+# 1. Confirmed TTS uses Amharic number pronunciation.
+# 2. Simplified the Board Display text (get_board_display_text) to reduce vertical stacking
+#    and keep the display clean, focusing on the current call.
 
 import os
 import logging
@@ -340,7 +341,7 @@ def create_wav_bytes(pcm_data: bytes, sample_rate: int = 24000) -> io.BytesIO:
     return buffer
 
 async def call_gemini_tts(text: str) -> io.BytesIO | None:
-    """Calls the Gemini TTS API and returns a WAV audio stream."""
+    """Calls the Gemini TTS API and returns a WAV audio stream, using Amharic."""
     if not requests: 
         logger.warning("TTS skipped: 'requests' module is missing. Install using: pip install requests")
         return None
@@ -353,7 +354,8 @@ async def call_gemini_tts(text: str) -> io.BytesIO | None:
     try:
         num = int(text.split('-')[1])
         amharic_word = AMHARIC_NUMBERS.get(num, str(num))
-        tts_prompt = f"Say clearly: {text}. In Amharic: {amharic_word}"
+        # PROMPT STRUCTURE: Keeps English call (for letter) and Amharic for number.
+        tts_prompt = f"Say clearly: {text}. In Amharic: {amharic_word}" 
     except (IndexError, ValueError):
         tts_prompt = f"Say clearly: {text}."
 
@@ -361,6 +363,7 @@ async def call_gemini_tts(text: str) -> io.BytesIO | None:
         "contents": [{"parts": [{"text": tts_prompt}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"], 
+            # Use 'Kore' voice explicitly
             "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}}
         },
         "model": "gemini-2.5-flash-preview-tts"
@@ -432,7 +435,8 @@ def build_card_keyboard(card, game_id, msg_id):
 
 def get_board_display_text(current_call_text: str, called_history: list) -> str:
     """
-    Displays only the current call prominently, with previous calls listed above it.
+    Displays the current call prominently on a single line, with previous calls
+    listed horizontally above it, keeping the display clean.
     """
     
     # 1. History (Only the last few numbers for context)
@@ -443,8 +447,8 @@ def get_board_display_text(current_call_text: str, called_history: list) -> str:
     else:
         history_display = "**የቀድሞ ጥሪዎች:** የለም"
         
-    # 2. Current Call (Prominent and Larger)
-    current_call_display = f"{EMOJI_CALL} **አሁን የሚጠራ ቁጥር:**\n# ***{current_call_text}***"
+    # 2. Current Call (Prominent and Single-line - addresses user's request)
+    current_call_display = f"{EMOJI_CALL} **አሁን የሚጠራ ቁጥር:** ***{current_call_text}***"
 
     return f"{history_display}\n\n---\n\n{current_call_display}"
 
@@ -725,7 +729,7 @@ async def start(u, c):
         "👋 **ወደ አዲስ ቢንጎ እንኳን ደህና መጡ!**\n\n"
         "🃏 **አዲስ የጨዋታ ህጎች:**\n"
         f"1. **የመጫወቻ ዋጋ:** እያንዳንዱ የቢንጎ ካርድ **{CARD_COST:.2f} ብር** ነው።\n"
-        f"2. **አሸናፊነት (ቢንጎ):** በካርዱ ላይ አግድም፣ ቁመት ወይም ሰያፍ (Diagonal) አምስት ቁጥሮች ሲሞሉ ቢንጎ ይሆናል። \n\n"
+        f"2. **አሸናፊነት (ቢንጎ):** በካርዱ ላይ አግድም፣ ቁመት ወይም ሰያፍ (Diagonal) አምስት ቁጥሮች ሲሞሉ ቢንጎ ይሆናል።\n\n"
         
         "### 📜 **ተጨማሪ መመሪያዎች:**\n"
         
@@ -1032,7 +1036,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         msg = (
             f"💰 **የቅርብ ጊዜ የግብይት ታሪክ (/history)**\n\n"
             f"ከዚህ በታች የመጨረሻዎቹ 5 የገንዘብ እንቅስቃሴዎችዎ ቀርበዋል:\n\n"
-            f"{history_list}"
+            f"{history_text}"
         )
         await update.message.reply_text(msg, parse_mode='Markdown')
         
