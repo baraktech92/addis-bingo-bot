@@ -1,8 +1,5 @@
-# Addis (አዲስ) Bingo Bot - V25.0: Stealth Win, Player Count Logic, and UI Fix
-# This version implements the CTO's strategic requirements:
-# 1. Stealth bot winning logic for 4 or fewer players.
-# 2. Organic game for 5 or more players.
-# 3. Improved UI for displaying the current called number and history.
+# Addis (አዲስ) Bingo Bot - V26.0: Balance Integrity Fix, MIN_DEPOSIT, and TTS Check
+# This version addresses the critical balance bug and ensures all constraints are met.
 
 import os
 import logging
@@ -36,9 +33,13 @@ ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '') 
 
 TELEBIRR_ACCOUNT = "0927922721"
-MIN_WITHDRAW = 100.00
+
+# --- Financial Constraints (Enforced automatically) ---
+CARD_COST = 20.00        # One game price
+MIN_DEPOSIT = 50.00      # Minimum deposit enforced in messaging
+MIN_WITHDRAW = 100.00    # Minimum for withdrawing, enforced in code
+
 REFERRAL_BONUS = 10.00
-CARD_COST = 20       
 
 # Conversation States
 GET_CARD_NUMBER, GET_WITHDRAW_AMOUNT, GET_TELEBIRR_ACCOUNT = range(3)
@@ -57,7 +58,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 5 # CTO Rule: Bots only play if real_count < 5
+MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 5 
 MAX_PRESET_CARDS = 200
 CALL_DELAY = 2.25  
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
@@ -91,39 +92,55 @@ except Exception as e:
     logger.error(f"Firestore initialization failed: {e}")
     
 USERS_COLLECTION = 'addis_bingo_users'
-STATS_COLLECTION = 'addis_bingo_stats' # Not strictly used, but kept for future expansion
+STATS_COLLECTION = 'addis_bingo_stats' 
 TRANSACTIONS_COLLECTION = 'addis_bingo_transactions'
 
 def create_or_update_user(user_id, username, first_name, referred_by_id=None):
     if not db: return
     
     doc_ref = db.collection(USERS_COLLECTION).document(str(user_id))
+    user_data = doc_ref.get().to_dict()
     
     data = {
         'username': username or 'N/A',
         'first_name': first_name,
+        'last_updated': firestore.SERVER_TIMESTAMP
     }
     
-    # Only set referred_by_id if it's the first time and a referrer exists
-    if referred_by_id and not doc_ref.get().to_dict().get('referred_by_id'):
-        data['referred_by_id'] = str(referred_by_id)
-        data['referrer_paid'] = False # Flag for referral bonus payout
+    # CRITICAL FIX: Ensure 'balance' exists and is a float/number for initial user.
+    if user_data is None:
+        data['balance'] = 0.00
+        data['games_played'] = 0
+        data['wins'] = 0
     
-    doc_ref.set(data, merge=True)
-    # Ensure initial fields exist for new users
-    doc_ref.set({'balance': 0, 'games_played': 0, 'wins': 0}, merge=True)
+    if referred_by_id and not (user_data and user_data.get('referred_by_id')):
+        data['referred_by_id'] = str(referred_by_id)
+        data['referrer_paid'] = False 
+    
+    try:
+        doc_ref.set(data, merge=True)
+    except exceptions.FirebaseError as e:
+        logger.error(f"Failed to create or update user {user_id}: {e}")
+
 
 def get_user_data(user_id: int) -> dict:
-    if not db: return {'balance': 0, 'first_name': 'Player', 'games_played': 0, 'wins': 0}
+    if not db: return {'balance': 0.00, 'first_name': 'Player', 'games_played': 0, 'wins': 0}
     doc = db.collection(USERS_COLLECTION).document(str(user_id)).get()
-    if doc.exists: return doc.to_dict()
-    return {'balance': 0, 'first_name': 'Player', 'games_played': 0, 'wins': 0}
+    if doc.exists: 
+        data = doc.to_dict()
+        # Ensure balance is treated as a float
+        data['balance'] = float(data.get('balance', 0.00))
+        return data
+        
+    return {'balance': 0.00, 'first_name': 'Player', 'games_played': 0, 'wins': 0}
 
 def update_balance(user_id: int, amount: float, transaction_type: str = 'General', description: str = ''):
     """Updates balance and logs the transaction."""
-    if not db: return
+    if not db: 
+        logger.warning(f"DB not initialized. Failed to update balance for {user_id}.")
+        return
     try:
-        # 1. Update Balance
+        # 1. Update Balance (Atomic Increment is used for safety)
         user_ref = db.collection(USERS_COLLECTION).document(str(user_id))
         user_ref.update({'balance': firestore.Increment(amount)})
         
@@ -131,12 +148,13 @@ def update_balance(user_id: int, amount: float, transaction_type: str = 'General
         db.collection(TRANSACTIONS_COLLECTION).add({
             'user_id': str(user_id),
             'amount': amount,
-            'type': transaction_type, # e.g., Deposit, Withdrawal, Card Purchase, Win, Referral
+            'type': transaction_type, 
             'description': description,
             'timestamp': firestore.SERVER_TIMESTAMP
         })
+        logger.info(f"Balance updated for {user_id}: {amount:.2f} ({transaction_type})")
     except exceptions.FirebaseError as e:
-        logger.error(f"Firestore operation failed in update_balance for user {user_id}: {e}")
+        logger.error(f"CRITICAL: Firestore balance update failed for user {user_id} (Amount: {amount}): {e}")
 
 def pay_referrer_bonus(user_id: int):
     """Checks if a user was referred and pays the bonus if they haven't been paid yet."""
@@ -154,7 +172,6 @@ def pay_referrer_bonus(user_id: int):
         # 2. Mark the user as having triggered the payment
         doc_ref.update({'referrer_paid': True})
         
-        # Log or notify the referrer (optional, but good practice)
         logger.info(f"Paid {REFERRAL_BONUS} Br referral bonus to user {referrer_id} for user {user_id}")
         return True
     return False
@@ -173,7 +190,6 @@ def update_game_stats(user_id: int, is_win: bool):
         user_ref.update(update_data)
     except exceptions.FirebaseError as e:
         logger.error(f"Failed to update game stats for user {user_id}: {e}")
-
 
 # --- Game State & Bots ---
 ACTIVE_GAMES = {} 
@@ -207,7 +223,7 @@ def get_total_players_target(real_count: int) -> int:
     if real_count == 4: 
         return random.randint(18, 20)
     
-    return 0 # Should not happen if real_count > 0
+    return 0 
 
 # --- Bingo Logic (TTS helpers, Card generation, Win checks etc. remain unchanged) ---
 
@@ -257,7 +273,7 @@ def check_win(card):
     if all(is_marked(i, 4-i) for i in range(5)): return True # Diag 2
     return False
 
-# --- Audio Helpers (TTS - Unchanged) ---
+# --- Audio Helpers (TTS) ---
 def create_wav_bytes(pcm_data: bytes, sample_rate: int = 24000) -> io.BytesIO:
     """Converts raw 16-bit PCM audio data into a playable WAV format stream."""
     buffer = io.BytesIO()
@@ -290,10 +306,14 @@ def create_wav_bytes(pcm_data: bytes, sample_rate: int = 24000) -> io.BytesIO:
 
 async def call_gemini_tts(text: str) -> io.BytesIO | None:
     """Calls the Gemini TTS API and returns a WAV audio stream."""
-    if not requests or not GEMINI_API_KEY: 
-        logger.warning("TTS skipped: 'requests' module or API key is missing.")
+    if not requests: 
+        logger.warning("TTS skipped: 'requests' module is missing. Install using: pip install requests")
         return None
     
+    if not GEMINI_API_KEY:
+        logger.error("TTS skipped: GEMINI_API_KEY is not set. Please configure the environment variable.")
+        return None
+
     # Extract the number from the format 'L-N' (e.g., B-12 -> 12)
     try:
         num = int(text.split('-')[1])
@@ -329,7 +349,7 @@ async def call_gemini_tts(text: str) -> io.BytesIO | None:
                 pcm = base64.b64decode(part['inlineData']['data'])
                 return create_wav_bytes(pcm)
             else:
-                logger.error(f"TTS API returned 200 but missing audio data in 'inlineData.data': {data}")
+                logger.error(f"TTS API returned 200 but missing audio data: {data}")
         else:
             logger.error(f"TTS API call failed with status {response.status_code}: {response.text}")
 
@@ -349,7 +369,7 @@ AMHARIC_NUMBERS = {
     71: "ሰባ አንድ", 72: "ሰባ ሁለት", 73: "ሰባ ሶስት", 74: "ሰባ አራት", 75: "ሰባ አምስት"
 }
 
-# --- UI & Text ---
+# --- UI & Text (Unchanged) ---
 def build_card_keyboard(card, game_id, msg_id):
     keyboard = []
     # Compact Header (B I N G O)
@@ -397,7 +417,7 @@ def get_board_display_text(current_call_text: str, called_history: list) -> str:
     
     return f"{current_call_display}\n\n---\n\n{history_display}"
 
-# --- Core Game ---
+# --- Core Game (Run loop logic remains unchanged) ---
 async def start_new_game(context: ContextTypes.DEFAULT_TYPE):
     global LOBBY_STATE
     players_data = list(PENDING_PLAYERS.items())
@@ -643,7 +663,7 @@ async def start(u, c):
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    bal = get_user_data(user_id).get('balance', 0)
+    bal = get_user_data(user_id).get('balance', 0.00)
     msg = f"💳 **የእርስዎ ቀሪ ሒሳብ (/balance):**\n\n**{bal:.2f} ብር**"
     await update.message.reply_text(msg, parse_mode='Markdown')
 
@@ -674,7 +694,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await update.message.reply_text("አስቀድመው በጨዋታ ለመግባት እየጠበቁ ነው!")
         return ConversationHandler.END
     
-    bal = get_user_data(user_id).get('balance', 0)
+    bal = get_user_data(user_id).get('balance', 0.00)
     if bal < CARD_COST:
         await update.message.reply_text(f"⛔ በቂ ቀሪ ሒሳብ የለዎትም። ለመጫወት {CARD_COST:.2f} ብር ያስፈልጋል። የአሁኑ ቀሪ ሒሳብዎ: {bal:.2f} ብር።\n\n/deposit የሚለውን ይጠቀሙ።", parse_mode='Markdown')
         return ConversationHandler.END
@@ -692,6 +712,12 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text(f"❌ እባክዎ ከ 1 እስከ {MAX_PRESET_CARDS} ባለው ክልል ውስጥ ትክክለኛ ቁጥር ያስገቡ።")
             return GET_CARD_NUMBER # Stay in conversation
         
+        # Re-check balance before final deduction (Security)
+        current_bal = get_user_data(user_id).get('balance', 0.00)
+        if current_bal < CARD_COST:
+            await update.message.reply_text("⛔ በቂ ቀሪ ሒሳብ የለዎትም። እባክዎ እንደገና ይሞክሩ።")
+            return ConversationHandler.END
+            
         # Deduct balance and join lobby (Balance integrity maintained)
         update_balance(user_id, -CARD_COST, transaction_type='Card Purchase', description=f"Card #{card_num} purchase")
         PENDING_PLAYERS[user_id] = card_num
@@ -724,7 +750,7 @@ async def quickplay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("አስቀድመው በጨዋታ ለመግባት እየጠበቁ ነው!")
         return
     
-    bal = get_user_data(user_id).get('balance', 0)
+    bal = get_user_data(user_id).get('balance', 0.00)
     if bal < CARD_COST:
         await update.message.reply_text(f"⛔ በቂ ቀሪ ሒሳብ የለዎትም። ለመጫወት {CARD_COST:.2f} ብር ያስፈልጋል። የአሁኑ ቀሪ ሒሳብዎ: {bal:.2f} ብር።\n\n/deposit የሚለውን ይጠቀሙ።", parse_mode='Markdown')
         return
@@ -919,13 +945,13 @@ async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"3. **የሽልማት ድርሻ:** አሸናፊው ከጠቅላላው ሽልማት ({WINNER_SHARE_PERCENT * 100:.0f}%) ያገኛል። የተቀረው ({GLOBAL_CUT_PERCENT * 100:.0f}%) የቤት ቅናሽ ይሆናል።\n"
         f"4. **የማርክ/ምልክት ማድረግ:** ቁጥሩ ከተጠራ በኋላ ካርድዎ ላይ ምልክት ማድረግ ያስፈልጋል። ካርድዎ ላይ ያሉት ቁጥሮች አረንጓዴ (🟢) ሲሆኑ ምልክት ማድረግ ይችላሉ።\n\n"
         f"### የገንዘብ አያያዝ:\n"
-        f"1. **ማስገቢያ:** ገንዘብ በ**ቴሌብር** በኩል ብቻ ነው ማስገባት የሚቻለው። ዝርዝሩን ለማየት **/deposit**ን ይጠቀሙ።\n"
+        f"1. **ማስገቢያ:** ገንዘብ በ**ቴሌብር** በኩል ብቻ ነው ማስገባት የሚቻለው። ዝቅተኛው የተቀማጭ ገንዘብ መጠን (Minimum Deposit): **{MIN_DEPOSIT:.2f} ብር** ነው። ዝርዝሩን ለማየት **/deposit**ን ይጠቀሙ።\n"
         f"2. **ማንሳት:** ዝቅተኛው የማውጣት መጠን **{MIN_WITHDRAW:.2f} ብር** ነው። ዝርዝሩን ለማየት **/withdraw**ን ይጠቀሙ።\n"
         f"3. **የሪፈራል ቦነስ:** ጓደኛዎን ሲጋብዙ እና የመጀመሪያውን ጨዋታ ሲጫወት **{REFERRAL_BONUS:.2f} ብር** ያገኛሉ።"
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# --- DEPOSIT, WITHDRAW, REFER (Unchanged) ---
+# --- DEPOSIT, WITHDRAW, REFER ---
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     admin_tag = f"@{ADMIN_USERNAME}" if ADMIN_USERNAME else "አስተዳዳሪ"
@@ -935,13 +961,13 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"1. ገንዘቡን ወደዚህ የቴሌብር ቁጥር ይላኩ: **{TELEBIRR_ACCOUNT}**\n"
         f"2. የገንዘብ ዝውውር ማረጋገጫ (receipt) ስክሪንሾት ያንሱ።\n"
         f"3. ስክሪንሾቱን እና የእርስዎን የቴሌግራም መታወቂያ (ID: `{user_id}`) ለዚህ አስተዳዳሪ ይላኩ: {admin_tag}\n\n"
-        f"ዝቅተኛ የተቀማጭ ገንዘብ መጠን (Minimum Deposit): **{CARD_COST} ብር**"
+        f"ዝቅተኛ የተቀማጭ ገንዘብ መጠን (Minimum Deposit): **{MIN_DEPOSIT:.2f} ብር**"
     )
     await update.message.reply_text(amharic_message, parse_mode='Markdown')
 
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
-    bal = get_user_data(user_id).get('balance', 0)
+    bal = get_user_data(user_id).get('balance', 0.00)
     
     context.user_data['balance'] = bal
     
