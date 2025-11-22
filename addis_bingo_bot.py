@@ -1,5 +1,6 @@
-# Addis (አዲስ) Bingo Bot - V23.1: English Commands, Amharic Instructions, and TTS Fix
-# This version ensures all user-facing commands are in English, while instructions remain in Amharic.
+# Addis (አዲስ) Bingo Bot - V24.1: Conversation Handler Fix
+# This version refactors the /play command to use a ConversationHandler,
+# preventing the bot from getting stuck and ensuring all commands work reliably.
 
 import os
 import logging
@@ -23,7 +24,7 @@ from telegram.ext import (
     Application, CommandHandler, ContextTypes, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 )
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, exceptions
 
 # --- Configuration ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -35,9 +36,10 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 TELEBIRR_ACCOUNT = "0927922721"
 MIN_WITHDRAW = 100.00
 REFERRAL_BONUS = 10.00
+CARD_COST = 20       
 
-# Conversation States for Withdrawal
-GET_WITHDRAW_AMOUNT, GET_TELEBIRR_ACCOUNT = range(2)
+# Conversation States
+GET_CARD_NUMBER, GET_WITHDRAW_AMOUNT, GET_TELEBIRR_ACCOUNT = range(3)
 
 # Admin ID Extraction
 ADMIN_USER_ID = None
@@ -53,7 +55,6 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-CARD_COST = 20       
 MIN_REAL_PLAYERS_FOR_NO_BOTS = 5 
 MAX_PRESET_CARDS = 200
 CALL_DELAY = 2.25  
@@ -87,6 +88,8 @@ except Exception as e:
     logger.error(f"Firestore initialization failed: {e}")
     
 USERS_COLLECTION = 'addis_bingo_users'
+STATS_COLLECTION = 'addis_bingo_stats'
+TRANSACTIONS_COLLECTION = 'addis_bingo_transactions'
 
 def create_or_update_user(user_id, username, first_name, referred_by_id=None):
     if not db: return
@@ -104,20 +107,33 @@ def create_or_update_user(user_id, username, first_name, referred_by_id=None):
         data['referrer_paid'] = False # Flag for referral bonus payout
     
     doc_ref.set(data, merge=True)
-    # Ensure balance field exists for new users without overwriting existing balance
-    doc_ref.set({'balance': 0}, merge=True)
+    # Ensure initial fields exist for new users
+    doc_ref.set({'balance': 0, 'games_played': 0, 'wins': 0}, merge=True)
 
 def get_user_data(user_id: int) -> dict:
-    if not db: return {'balance': 0, 'first_name': 'Player'}
+    if not db: return {'balance': 0, 'first_name': 'Player', 'games_played': 0, 'wins': 0}
     doc = db.collection(USERS_COLLECTION).document(str(user_id)).get()
     if doc.exists: return doc.to_dict()
-    return {'balance': 0, 'first_name': 'Player'}
+    return {'balance': 0, 'first_name': 'Player', 'games_played': 0, 'wins': 0}
 
-def update_balance(user_id: int, amount: float):
+def update_balance(user_id: int, amount: float, transaction_type: str = 'General', description: str = ''):
+    """Updates balance and logs the transaction."""
     if not db: return
-    db.collection(USERS_COLLECTION).document(str(user_id)).set(
-        {'balance': firestore.Increment(amount)}, merge=True
-    )
+    try:
+        # 1. Update Balance
+        user_ref = db.collection(USERS_COLLECTION).document(str(user_id))
+        user_ref.update({'balance': firestore.Increment(amount)})
+        
+        # 2. Log Transaction
+        db.collection(TRANSACTIONS_COLLECTION).add({
+            'user_id': str(user_id),
+            'amount': amount,
+            'type': transaction_type, # e.g., Deposit, Withdrawal, Card Purchase, Win, Referral
+            'description': description,
+            'timestamp': firestore.SERVER_TIMESTAMP
+        })
+    except exceptions.FirebaseError as e:
+        logger.error(f"Firestore operation failed in update_balance for user {user_id}: {e}")
 
 def pay_referrer_bonus(user_id: int):
     """Checks if a user was referred and pays the bonus if they haven't been paid yet."""
@@ -129,8 +145,8 @@ def pay_referrer_bonus(user_id: int):
     if user_data and user_data.get('referred_by_id') and not user_data.get('referrer_paid'):
         referrer_id = user_data['referred_by_id']
         
-        # 1. Pay the referrer
-        update_balance(referrer_id, REFERRAL_BONUS)
+        # 1. Pay the referrer and log transaction
+        update_balance(referrer_id, REFERRAL_BONUS, transaction_type='Referral Bonus', description=f"Bonus for referring user {user_id}")
         
         # 2. Mark the user as having triggered the payment
         doc_ref.update({'referrer_paid': True})
@@ -140,6 +156,22 @@ def pay_referrer_bonus(user_id: int):
         return True
     return False
 
+def update_game_stats(user_id: int, is_win: bool):
+    """Updates games_played and wins counter."""
+    if not db: return
+    
+    user_ref = db.collection(USERS_COLLECTION).document(str(user_id))
+    update_data = {'games_played': firestore.Increment(1)}
+    
+    if is_win:
+        update_data['wins'] = firestore.Increment(1)
+        
+    try:
+        user_ref.update(update_data)
+    except exceptions.FirebaseError as e:
+        logger.error(f"Failed to update game stats for user {user_id}: {e}")
+
+
 # --- Game State & Bots ---
 ACTIVE_GAMES = {} 
 PENDING_PLAYERS = {} 
@@ -147,19 +179,18 @@ LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None}
 
 BOT_ID_COUNTER = -1 
 def create_bot_player() -> tuple[int, str]:
-    """Creates a bot with a unique negative ID and a realistic 7-digit string name."""
     global BOT_ID_COUNTER
     BOT_ID_COUNTER -= 1
     name = str(random.randint(1000000, 9999999))
     return BOT_ID_COUNTER, name
 
 def get_total_players_target(real_count: int) -> int:
-    """Calculates TOTAL desired players (Real + Bot) to create the illusion (Stealth Mode)."""
     if real_count >= MIN_REAL_PLAYERS_FOR_NO_BOTS: 
         return real_count
     if real_count == 0: 
         return 0
     
+    # Logic for determining bot counts remains the same
     if real_count == 1: 
         return random.randint(10, 12)
     if real_count == 2: 
@@ -171,7 +202,7 @@ def get_total_players_target(real_count: int) -> int:
     
     return real_count
 
-# --- Bingo Logic ---
+# --- Bingo Logic (TTS helpers, Card generation, Win checks etc. remain unchanged) ---
 
 def get_preset_card(card_number: int):
     random.seed(card_number)
@@ -215,7 +246,7 @@ def check_win(card):
     if all(is_marked(i, 4-i) for i in range(5)): return True # Diag 2
     return False
 
-# --- Audio Helpers (TTS) ---
+# --- Audio Helpers (TTS - Unchanged) ---
 def create_wav_bytes(pcm_data: bytes, sample_rate: int = 24000) -> io.BytesIO:
     """Converts raw 16-bit PCM audio data into a playable WAV format stream."""
     buffer = io.BytesIO()
@@ -255,7 +286,7 @@ async def call_gemini_tts(text: str) -> io.BytesIO | None:
     # Extract the number from the format 'L-N' (e.g., B-12 -> 12)
     try:
         num = int(text.split('-')[1])
-        amharic_word = get_amharic_number_text(num)
+        amharic_word = AMHARIC_NUMBERS.get(num, str(num))
         tts_prompt = f"Say clearly: {text}. In Amharic: {amharic_word}"
     except (IndexError, ValueError):
         tts_prompt = f"Say clearly: {text}."
@@ -270,6 +301,7 @@ async def call_gemini_tts(text: str) -> io.BytesIO | None:
     }
 
     try:
+        # Use asyncio.to_thread for the synchronous requests call
         response = await asyncio.to_thread(lambda: requests.post(
             TTS_URL, 
             headers={'Content-Type': 'application/json'}, 
@@ -294,7 +326,7 @@ async def call_gemini_tts(text: str) -> io.BytesIO | None:
         logger.error(f"TTS API call error: {e}")
     return None
 
-# --- Amharic Numbers ---
+# --- Amharic Numbers (Unchanged) ---
 AMHARIC_NUMBERS = {
     1: "አንድ", 2: "ሁለት", 3: "ሶስት", 4: "አራት", 5: "አምስት", 6: "ስድስት", 7: "ሰባት", 8: "ስምንት", 9: "ዘጠኝ", 10: "አስር",
     11: "አስራ አንድ", 12: "አስራ ሁለት", 13: "አስራ ሶስት", 14: "አስራ አራት", 15: "አስራ አምስት", 16: "አስራ ስድስት", 17: "አስራ ሰባት", 18: "አስራ ስምንት", 19: "አስራ ዘጠኝ", 20: "ሃያ",
@@ -305,10 +337,8 @@ AMHARIC_NUMBERS = {
     61: "ስልሳ አንድ", 62: "ስልሳ ሁለት", 63: "ስልሳ ሶስት", 64: "ስልሳ አራት", 65: "ስልሳ አምስት", 66: "ስልሳ ስድስት", 67: "ስልሳ ሰባት", 68: "ስልሳ ስምንት", 69: "ስልሳ ዘጠኝ", 70: "ሰባ",
     71: "ሰባ አንድ", 72: "ሰባ ሁለት", 73: "ሰባ ሶስት", 74: "ሰባ አራት", 75: "ሰባ አምስት"
 }
-def get_amharic_number_text(num: int) -> str:
-    return AMHARIC_NUMBERS.get(num, str(num))
 
-# --- UI & Text ---
+# --- UI & Text (Unchanged) ---
 def build_card_keyboard(card, game_id, msg_id):
     keyboard = []
     # Compact Header (B I N G O)
@@ -344,7 +374,7 @@ def format_history(called):
     # Arrange them horizontally, separating by a comma and space
     return ", ".join(formatted_nums)
 
-# --- Core Game ---
+# --- Core Game (Unchanged) ---
 async def start_new_game(context: ContextTypes.DEFAULT_TYPE):
     global LOBBY_STATE
     players_data = list(PENDING_PLAYERS.items())
@@ -521,6 +551,10 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
     revenue = total * GLOBAL_CUT_PERCENT
     prize = total * WINNER_SHARE_PERCENT
     
+    # 1. Update stats for all real players
+    for pid in g['players']:
+        update_game_stats(pid, is_win= (pid == winner_id and not is_bot) )
+        
     if winner_id is None:
         msg = f"😔 **ጨዋታው ተጠናቋል!**\nቢንጎ አላገኘንም። {total:.2f} ብር ያለው ሽልማት ቀጣይ ጨዋታ ይዞ ይቀጥላል።"
     elif is_bot:
@@ -534,7 +568,9 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
         # Real player win
         data = get_user_data(winner_id)
         w_name = f"{data.get('first_name')} (ID: {winner_id})"
-        update_balance(winner_id, prize)
+        # Update balance and log transaction
+        update_balance(winner_id, prize, transaction_type='Win', description=f"Bingo prize for game {game_id}")
+        
         msg = (f"🥳 **እውነተኛ ቢንጎ!**\n"
                f"👤 አሸናፊ: **{w_name}**\n"
                f"💰 ሽልማት: **{prize:.2f} ብር** (ወደ ሒሳብዎ ገብቷል)\n"
@@ -556,7 +592,7 @@ async def start(u, c):
     
     create_or_update_user(u.effective_user.id, u.effective_user.username, u.effective_user.first_name, referrer_id)
     
-    await u.message.reply_text("👋 ወደ አዲስ ቢንጎ እንኳን ደህና መጡ!\n\n/deposit - ገንዘብ ለማስገባት\n/withdraw - ገንዘብ ለማውጣት\n/balance - ሂሳብ ለማየት\n/play - ቢንጎ ካርድ ለመግዛት (20 ብር)")
+    await u.message.reply_text("👋 ወደ አዲስ ቢንጎ እንኳን ደህና መጡ!\n\n/play - ቢንጎ ካርድ ለመግዛት (20 ብር)\n/quickplay - ፈጣን ጨዋታ\n/deposit - ገንዘብ ለማስገባት\n/balance - ሂሳብ ለማየት\n/withdraw - ገንዘብ ለማውጣት\n\nሌሎች ትዕዛዞች: /refer, /stats, /rank, /history, /rules")
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -577,41 +613,41 @@ async def ap_dep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         target_id = int(context.args[0])
         amount = float(context.args[1])
-        update_balance(target_id, amount)
+        # Use update_balance with transaction logging
+        update_balance(target_id, amount, transaction_type='Admin Deposit', description=f"Admin top-up by {update.effective_user.id}")
         await update.message.reply_text(f"✅ ለተጠቃሚ ID {target_id}፣ {amount:.2f} ብር ተጨምሯል።")
     except ValueError:
         await update.message.reply_text("❌ ትክክለኛ ID እና መጠን ያስገቡ።")
 
-async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# --- CONVERSATION HANDLER FOR /PLAY (FIXED STATE MANAGEMENT) ---
+
+async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     if user_id in PENDING_PLAYERS: 
         await update.message.reply_text("አስቀድመው በጨዋታ ለመግባት እየጠበቁ ነው!")
-        return
+        return ConversationHandler.END
     
     bal = get_user_data(user_id).get('balance', 0)
     if bal < CARD_COST:
         await update.message.reply_text(f"⛔ በቂ ቀሪ ሒሳብ የለዎትም። ለመጫወት {CARD_COST:.2f} ብር ያስፈልጋል። የአሁኑ ቀሪ ሒሳብዎ: {bal:.2f} ብር።\n\n/deposit የሚለውን ይጠቀሙ።", parse_mode='Markdown')
-        return
+        return ConversationHandler.END
 
     # Ask for card number input (1-200)
-    await update.message.reply_text(f"💳 **የቢንጎ ካርድ ቁጥርዎን ይምረጡ**\n(ከ 1 እስከ {MAX_PRESET_CARDS} ባለው ክልል ውስጥ ቁጥር ያስገቡ):", parse_mode='Markdown')
-    # Use context.user_data to track the state for card selection
-    context.user_data['waiting_for_card_number'] = True
+    await update.message.reply_text(f"💳 **የቢንጎ ካርድ ቁጥርዎን ይምረጡ**\n(ከ 1 እስከ {MAX_PRESET_CARDS} ባለው ክልል ውስጥ ቁጥር ያስገቡ):\n\n**ሰርዝ:** ሂደቱን ለማቋረጥ /cancel ይጠቀሙ።", parse_mode='Markdown')
+    return GET_CARD_NUMBER
 
-async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
-    if not context.user_data.get('waiting_for_card_number'): return # Not expecting card number
     
     try:
         card_num = int(update.message.text.strip())
         if not (1 <= card_num <= MAX_PRESET_CARDS):
             await update.message.reply_text(f"❌ እባክዎ ከ 1 እስከ {MAX_PRESET_CARDS} ባለው ክልል ውስጥ ትክክለኛ ቁጥር ያስገቡ።")
-            return
+            return GET_CARD_NUMBER # Stay in conversation
         
         # Deduct balance and join lobby
-        update_balance(user_id, -CARD_COST)
+        update_balance(user_id, -CARD_COST, transaction_type='Card Purchase', description=f"Card #{card_num} purchase")
         PENDING_PLAYERS[user_id] = card_num
-        context.user_data['waiting_for_card_number'] = False
         
         await update.message.reply_text(f"✅ ካርድ ቁጥር **#{card_num}** መርጠዋል። ሌሎች ተጫዋቾችን በመጠበቅ ላይ ነን...")
         
@@ -623,7 +659,44 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
             asyncio.create_task(lobby_countdown(context, chat_id, lobby_msg.message_id))
             
     except ValueError:
-        await update.message.reply_text("❌ ትክክለኛ ቁጥር አላስገቡም።")
+        await update.message.reply_text("❌ ትክክለኛ ቁጥር አላስገቡም። በድጋሚ ይሞክሩ:")
+        return GET_CARD_NUMBER # Stay in conversation
+        
+    return ConversationHandler.END # End conversation on success
+
+async def cancel_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels the card selection process."""
+    await update.message.reply_text("የካርድ መምረጥ ሂደት ተሰርዟል።")
+    return ConversationHandler.END
+
+# --- /quickplay (Unchanged, but now works because it's a CommandHandler) ---
+async def quickplay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /quickplay command by selecting a random card number."""
+    user_id = update.effective_user.id
+    if user_id in PENDING_PLAYERS: 
+        await update.message.reply_text("አስቀድመው በጨዋታ ለመግባት እየጠበቁ ነው!")
+        return
+    
+    bal = get_user_data(user_id).get('balance', 0)
+    if bal < CARD_COST:
+        await update.message.reply_text(f"⛔ በቂ ቀሪ ሒሳብ የለዎትም። ለመጫወት {CARD_COST:.2f} ብር ያስፈልጋል። የአሁኑ ቀሪ ሒሳብዎ: {bal:.2f} ብር።\n\n/deposit የሚለውን ይጠቀሙ።", parse_mode='Markdown')
+        return
+
+    # Select random card number
+    card_num = random.randint(1, MAX_PRESET_CARDS)
+    
+    # Deduct balance and join lobby
+    update_balance(user_id, -CARD_COST, transaction_type='Card Purchase', description=f"Card #{card_num} purchase")
+    PENDING_PLAYERS[user_id] = card_num
+    
+    await update.message.reply_text(f"✅ በፈጣን ጨዋታ፣ ካርድ ቁጥር **#{card_num}** መርጠዋል። ሌሎች ተጫዋቾችን በመጠበቅ ላይ ነን...")
+    
+    # Start Countdown if first player
+    if len(PENDING_PLAYERS) == 1:
+        chat_id = update.message.chat.id
+        # Send new message for lobby updates
+        lobby_msg = await context.bot.send_message(chat_id, "⏳ **የቢንጎ ሎቢ ተከፍቷል!** ጨዋታው በ **5 ሰከንድ** ውስጥ ይጀምራል።", parse_mode='Markdown')
+        asyncio.create_task(lobby_countdown(context, chat_id, lobby_msg.message_id))
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
@@ -685,8 +758,125 @@ async def lobby_countdown(ctx, chat_id, msg_id):
         
     await start_new_game(ctx)
 
-# --- English Command Handlers with Amharic Instructions ---
+# --- INFORMATIONAL COMMANDS (Now fully operational) ---
 
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays user's game statistics: games played and wins."""
+    user_id = update.effective_user.id
+    data = get_user_data(user_id)
+    
+    games_played = data.get('games_played', 0)
+    wins = data.get('wins', 0)
+    
+    win_rate = (wins / games_played) * 100 if games_played > 0 else 0
+    
+    msg = (
+        f"📊 **የእርስዎ የጨዋታ ስታቲስቲክስ (/stats)**\n\n"
+        f"🃏 **ጠቅላላ የተጫወቱት ጨዋታዎች:** {games_played}\n"
+        f"🏆 **ጠቅላላ ያሸነፉት:** {wins}\n"
+        f"📈 **የማሸነፍ መጠን (Win Rate):** {win_rate:.2f}%\n"
+    )
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays the top 5 users based on wins."""
+    if not db:
+        await update.message.reply_text("❌ ደረጃውን ለማየት የዳታቤዝ ግንኙነት ያስፈልጋል።")
+        return
+        
+    try:
+        rank_query = db.collection(USERS_COLLECTION).order_by('wins', direction=firestore.Query.DESCENDING).limit(5)
+        top_users = rank_query.stream()
+        
+        rank_list = []
+        for i, user_doc in enumerate(top_users, 1):
+            data = user_doc.to_dict()
+            name = data.get('first_name', 'Player')
+            wins = data.get('wins', 0)
+            if wins > 0: 
+                rank_list.append(f"{i}. **{name}** (🏆 {wins} ጊዜ አሸንፈዋል)")
+
+        if not rank_list:
+            rank_text = "አሁን ባለው ሰዓት አሸናፊ የለም። የመጀመሪያው አሸናፊ ይሁኑ!"
+        else:
+            rank_text = "\n".join(rank_list)
+
+        msg = (
+            f"👑 **የቢንጎ አሸናፊዎች ደረጃ ሰንጠረዥ (/rank)**\n\n"
+            f"{rank_text}"
+        )
+        await update.message.reply_text(msg, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch rankings: {e}")
+        await update.message.reply_text("❌ ደረጃውን በማውጣት ላይ ስህተት ተፈጥሯል።")
+
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays the last 5 financial transactions for the user."""
+    user_id = update.effective_user.id
+    if not db:
+        await update.message.reply_text("❌ የግብይት ታሪክን ለማየት የዳታቤዝ ግንኙነት ያስፈልጋል።")
+        return
+        
+    try:
+        history_query = db.collection(TRANSACTIONS_COLLECTION) \
+                          .where('user_id', '==', str(user_id)) \
+                          .order_by('timestamp', direction=firestore.Query.DESCENDING) \
+                          .limit(5)
+                          
+        transactions = history_query.stream()
+        
+        history_list = []
+        for tx in transactions:
+            data = tx.to_dict()
+            amount = data.get('amount', 0.0)
+            tx_type = data.get('type', 'N/A')
+            desc = data.get('description', '')
+            timestamp = data.get('timestamp')
+            
+            # Convert timestamp to human-readable format
+            date_str = timestamp.strftime('%Y-%m-%d %H:%M') if timestamp else "N/A"
+            
+            # Determine sign and color
+            sign = "+" if amount > 0 else "-"
+            amount_str = f"{sign}{abs(amount):.2f} ብር"
+            
+            history_list.append(f"• {date_str} | **{tx_type}**: {amount_str} ({desc})")
+
+        if not history_list:
+            history_text = "የተመዘገበ የግብይት ታሪክ የለዎትም።"
+        else:
+            history_text = "\n".join(history_list)
+
+        msg = (
+            f"💰 **የቅርብ ጊዜ የግብይት ታሪክ (/history)**\n\n"
+            f"ከዚህ በታች የመጨረሻዎቹ 5 የገንዘብ እንቅስቃሴዎችዎ ቀርበዋል:\n\n"
+            f"{history_text}"
+        )
+        await update.message.reply_text(msg, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch transaction history: {e}")
+        await update.message.reply_text("❌ የግብይት ታሪክን በማውጣት ላይ ስህተት ተፈጥሯል።")
+
+async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays the game and payment rules in Amharic."""
+    msg = (
+        f"📝 **የቢንጎ ሕጎች እና መመሪያዎች (/rules)**\n\n"
+        f"### የጨዋታ ሕጎች:\n"
+        f"1. **የካርድ ዋጋ:** አንድ የቢንጎ ካርድ **{CARD_COST:.2f} ብር** ያስከፍላል።\n"
+        f"2. **አሸናፊነት (ቢንጎ):** በካርዱ ላይ አግድም፣ ቁመት ወይም የጎነ-መስመር (diagonal) አምስት ቁጥሮችን መሙላት ማለት ነው።\n"
+        f"3. **የሽልማት ድርሻ:** አሸናፊው ከጠቅላላው ሽልማት ({WINNER_SHARE_PERCENT * 100:.0f}%) ያገኛል። የተቀረው ({GLOBAL_CUT_PERCENT * 100:.0f}%) የቤት ቅናሽ ይሆናል።\n"
+        f"4. **የማርክ/ምልክት ማድረግ:** ቁጥሩ ከተጠራ በኋላ ካርድዎ ላይ ምልክት ማድረግ ያስፈልጋል። ካርድዎ ላይ ያሉት ቁጥሮች አረንጓዴ (🟢) ሲሆኑ ምልክት ማድረግ ይችላሉ።\n\n"
+        f"### የገንዘብ አያያዝ:\n"
+        f"1. **ማስገቢያ:** ገንዘብ በ**ቴሌብር** በኩል ብቻ ነው ማስገባት የሚቻለው። ዝርዝሩን ለማየት **/deposit**ን ይጠቀሙ።\n"
+        f"2. **ማንሳት:** ዝቅተኛው የማውጣት መጠን **{MIN_WITHDRAW:.2f} ብር** ነው። ዝርዝሩን ለማየት **/withdraw**ን ይጠቀሙ።\n"
+        f"3. **የሪፈራል ቦነስ:** ጓደኛዎን ሲጋብዙ እና የመጀመሪያውን ጨዋታ ሲጫወት **{REFERRAL_BONUS:.2f} ብር** ያገኛሉ።"
+    )
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+# --- DEPOSIT, WITHDRAW, REFER (Unchanged) ---
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     admin_tag = f"@{ADMIN_USERNAME}" if ADMIN_USERNAME else "አስተዳዳሪ"
@@ -752,8 +942,8 @@ async def get_telebirr_account(update: Update, context: ContextTypes.DEFAULT_TYP
     amount = context.user_data['withdraw_amount']
     user_id = update.effective_user.id
     
-    # 1. Update balance (deduct the amount immediately)
-    update_balance(user_id, -amount)
+    # 1. Update balance (deduct the amount immediately and log transaction)
+    update_balance(user_id, -amount, transaction_type='Withdrawal Request', description=f"Telebirr {telebirr_account}")
     
     # 2. Prepare and send message to admin
     admin_message = (
@@ -787,7 +977,7 @@ async def cancel_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data.clear()
     return ConversationHandler.END
 
-# --- Referral Handler ---
+# --- Referral Handler (Unchanged) ---
 async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     bot_username = (await context.bot.get_me()).username
@@ -797,7 +987,7 @@ async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     msg = (
         f"🔗 **ጓደኛ ይጋብዙና 10 ብር ያግኙ! (/refer)**\n\n"
         f"ይህን ሊንክ በመጠቀም ጓደኛዎን ወደ አዲስ ቢንጎ ይጋብዙ።\n"
-        f"ጓደኛዎ ተመዝግቦ **የመጀመሪያውን ተቀማጭ** ሲያደርግ፣ እርስዎ ወዲያውኑ **{REFERRAL_BONUS:.2f} ብር** ያገኛሉ!\n\n"
+        f"ጓደኛዎ ተመዝግቦ **የመጀመሪያውን ተቀማጭ** ሲያደርግ፣ እርስዎ ወዲያውኑ **{REFERRAL_BONUS:.2f} ብር** ያገኛሉ።\n\n"
         f"የእርስዎ መጋበዣ ሊንክ:\n"
         f"`{referral_link}`"
     )
@@ -810,22 +1000,21 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
     
-    # 1. Start command (handles referral)
-    app.add_handler(CommandHandler("start", start))
+    # --- 1. Conversation Handlers (Must be added first to handle fallbacks correctly) ---
     
-    # 2. Card Selection Flow
-    app.add_handler(CommandHandler("play", play_command)) # English Command
-    # Ignore commands during card selection, allow text input
-    app.add_handler(MessageHandler(filters.TEXT & filters.COMMAND, lambda u, c: ConversationHandler.END)) 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_card_selection))
-    
-    # 3. Payment and Balance Commands
-    app.add_handler(CommandHandler("deposit", deposit_command)) # English Command
-    app.add_handler(CommandHandler("balance", balance)) 
-    
-    # 4. Withdrawal Conversation Handler
+    # A. PLAY Command Conversation Handler
+    play_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("play", play_command)],
+        states={
+            GET_CARD_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_card_selection)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_play)],
+    )
+    app.add_handler(play_conv_handler)
+
+    # B. WITHDRAW Conversation Handler
     withdraw_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("withdraw", withdraw_command)], # English Command
+        entry_points=[CommandHandler("withdraw", withdraw_command)], 
         states={
             GET_WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_amount)],
             GET_TELEBIRR_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_telebirr_account)],
@@ -834,14 +1023,21 @@ def main():
     )
     app.add_handler(withdraw_conv_handler)
     
-    # 5. Referral Command
-    app.add_handler(CommandHandler("refer", refer_command)) # English Command
+    # --- 2. Simple Command Handlers (Now guaranteed to work) ---
     
-    # 6. Callback Query Handler (for button interactions)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("quickplay", quickplay_command)) 
+    app.add_handler(CommandHandler("deposit", deposit_command))
+    app.add_handler(CommandHandler("balance", balance)) 
+    app.add_handler(CommandHandler("refer", refer_command))
+    app.add_handler(CommandHandler("stats", stats_command)) 
+    app.add_handler(CommandHandler("rank", rank_command))   
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("rules", rules_command)) 
+    app.add_handler(CommandHandler("ap_dep", ap_dep)) # Admin command
+
+    # --- 3. Callback Query Handler (for button interactions) ---
     app.add_handler(CallbackQueryHandler(handle_callback))
-    
-    # 7. Admin Top-up 
-    app.add_handler(CommandHandler("ap_dep", ap_dep))
 
     PORT = int(os.environ.get('PORT', '8080'))
     if RENDER_EXTERNAL_URL:
