@@ -1,6 +1,8 @@
-# Addis (አዲስ) Bingo Bot - V24.1: Conversation Handler Fix
-# This version refactors the /play command to use a ConversationHandler,
-# preventing the bot from getting stuck and ensuring all commands work reliably.
+# Addis (አዲስ) Bingo Bot - V25.0: Stealth Win, Player Count Logic, and UI Fix
+# This version implements the CTO's strategic requirements:
+# 1. Stealth bot winning logic for 4 or fewer players.
+# 2. Organic game for 5 or more players.
+# 3. Improved UI for displaying the current called number and history.
 
 import os
 import logging
@@ -55,7 +57,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-MIN_REAL_PLAYERS_FOR_NO_BOTS = 5 
+MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 5 # CTO Rule: Bots only play if real_count < 5
 MAX_PRESET_CARDS = 200
 CALL_DELAY = 2.25  
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
@@ -75,6 +77,7 @@ EMOJI_FREE = '🌟'
 EMOJI_CARD = '🃏'
 EMOJI_BINGO = '🏆'
 EMOJI_HISTORY = '🔢'
+EMOJI_CALL = '📢'
 
 # --- Database Setup (Firestore) ---
 db = None
@@ -88,7 +91,7 @@ except Exception as e:
     logger.error(f"Firestore initialization failed: {e}")
     
 USERS_COLLECTION = 'addis_bingo_users'
-STATS_COLLECTION = 'addis_bingo_stats'
+STATS_COLLECTION = 'addis_bingo_stats' # Not strictly used, but kept for future expansion
 TRANSACTIONS_COLLECTION = 'addis_bingo_transactions'
 
 def create_or_update_user(user_id, username, first_name, referred_by_id=None):
@@ -181,16 +184,20 @@ BOT_ID_COUNTER = -1
 def create_bot_player() -> tuple[int, str]:
     global BOT_ID_COUNTER
     BOT_ID_COUNTER -= 1
-    name = str(random.randint(1000000, 9999999))
+    # Bot names are generic IDs to simulate real users without being identifiable
+    name = f"P-{random.randint(100000, 999999)}"
     return BOT_ID_COUNTER, name
 
 def get_total_players_target(real_count: int) -> int:
-    if real_count >= MIN_REAL_PLAYERS_FOR_NO_BOTS: 
-        return real_count
-    if real_count == 0: 
-        return 0
+    """
+    CTO Rule Implementation: Determines the total number of players (real + bots).
+    If real_count >= 5, returns real_count (No bots, organic game).
+    If real_count <= 4, ensures a high player count (Stealth mode).
+    """
+    if real_count >= MIN_REAL_PLAYERS_FOR_ORGANIC_GAME: 
+        return real_count  # No bots, organic game
     
-    # Logic for determining bot counts remains the same
+    # When 4 or fewer players, maximize bot appearance
     if real_count == 1: 
         return random.randint(10, 12)
     if real_count == 2: 
@@ -200,7 +207,7 @@ def get_total_players_target(real_count: int) -> int:
     if real_count == 4: 
         return random.randint(18, 20)
     
-    return real_count
+    return 0 # Should not happen if real_count > 0
 
 # --- Bingo Logic (TTS helpers, Card generation, Win checks etc. remain unchanged) ---
 
@@ -224,12 +231,16 @@ def get_card_value(card, col_idx, row_idx):
     if col_idx == 2 and row_idx == 2: return "FREE"
     col = COLUMNS[col_idx]
     arr = card['data'][col]
-    return arr[row_idx] if col != 'N' or row_idx < 2 else arr[row_idx-1] if row_idx > 2 else "FREE"
+    # N column has the free space at (2,2). 
+    if col == 'N':
+        return arr[row_idx] if row_idx < 2 else arr[row_idx - 1] if row_idx > 2 else "FREE"
+    return arr[row_idx]
 
 def get_card_position(card, value):
     for c_idx, col in enumerate(COLUMNS):
         arr = card['data'][col]
         if col == 'N':
+            # Check for value in N column, excluding the free space position
             if value in arr:
                 idx = arr.index(value)
                 return c_idx, idx if idx < 2 else idx + 1
@@ -338,7 +349,7 @@ AMHARIC_NUMBERS = {
     71: "ሰባ አንድ", 72: "ሰባ ሁለት", 73: "ሰባ ሶስት", 74: "ሰባ አራት", 75: "ሰባ አምስት"
 }
 
-# --- UI & Text (Unchanged) ---
+# --- UI & Text ---
 def build_card_keyboard(card, game_id, msg_id):
     keyboard = []
     # Compact Header (B I N G O)
@@ -365,7 +376,7 @@ def build_card_keyboard(card, game_id, msg_id):
     return InlineKeyboardMarkup(keyboard)
 
 def format_history(called):
-    """Formats called numbers horizontally."""
+    """Formats called numbers horizontally, separated by commas."""
     if not called: return ""
     
     # Format each number as L-N (e.g., B-12)
@@ -374,7 +385,19 @@ def format_history(called):
     # Arrange them horizontally, separating by a comma and space
     return ", ".join(formatted_nums)
 
-# --- Core Game (Unchanged) ---
+def get_board_display_text(current_call_text: str, called_history: list) -> str:
+    """Constructs the board message with current call prominent and history below."""
+    
+    # 1. Current Call (Prominent)
+    current_call_display = f"{EMOJI_CALL} **አሁን የሚጠራ ቁጥር:**\n# **{current_call_text}**"
+    
+    # 2. History (Horizontal)
+    hist_txt = format_history(called_history)
+    history_display = f"{EMOJI_HISTORY} **የተጠሩ ቁጥሮች ታሪክ**:\n`{hist_txt}`"
+    
+    return f"{current_call_display}\n\n---\n\n{history_display}"
+
+# --- Core Game ---
 async def start_new_game(context: ContextTypes.DEFAULT_TYPE):
     global LOBBY_STATE
     players_data = list(PENDING_PLAYERS.items())
@@ -412,6 +435,7 @@ async def start_new_game(context: ContextTypes.DEFAULT_TYPE):
         'total_players_announced': total_target
     }
     
+    # Clear pending players
     for pid in real_pids: del PENDING_PLAYERS[pid]
     ACTIVE_GAMES[game_id] = game_data
     LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None}
@@ -426,42 +450,56 @@ async def start_new_game(context: ContextTypes.DEFAULT_TYPE):
 async def run_game_loop(context, game_id, real_pids, bot_players):
     game_data = ACTIVE_GAMES[game_id]
     
-    # Referral Bonus Check (Happens when the first game is played after card purchase)
+    # Referral Bonus Check
     for pid in real_pids:
         pay_referrer_bonus(pid) 
         
-    # Bot Winning Sequence setup (if bots are playing, they win)
     winning_bot_id = None
-    forced_sequence = list(range(1, 76))
-    random.shuffle(forced_sequence)
+    all_possible_nums = list(range(1, 76))
+    forced_sequence = []
     
+    # --- CTO Rule: Bot Win Logic ---
     if bot_players:
+        # If bots are present (real players <= 4), select one bot to win.
         winning_bot_id = list(bot_players.keys())[0]
         w_card = bot_players[winning_bot_id]['card']
-        win_nums = [get_card_value(w_card, c, 0) for c in range(5)]
+        
+        # We will use the top row (row 0) for the forced win (5 numbers)
+        win_nums = [get_card_value(w_card, c, 0) for c in range(5) if c != 2 or w_card['data'].get('N')]
         win_nums = [x for x in win_nums if x != "FREE"]
-        other_nums = [n for n in range(1, 76) if n not in win_nums]
+        
+        # 1. Choose a random number of calls (10-20) to make the game feel normal
+        total_calls_before_win = random.randint(10, 20)
+        
+        # 2. Get random numbers for the first N calls
+        other_nums = [n for n in all_possible_nums if n not in win_nums]
         random.shuffle(other_nums)
-        # Ensure winning numbers are called between 10th and 20th call 
-        insert_point = random.randint(10, 20)
         
-        # Simple sequence generation: A few random, winning numbers, then the rest of random
-        temp_seq = other_nums[:]
+        # 3. Insert winning numbers into the call sequence
         
-        # Put winning numbers into the sequence
-        for num in win_nums:
-            if num in temp_seq:
-                temp_seq.remove(num)
-            temp_seq.insert(insert_point, num)
-            insert_point += 1 
-            
-        random.shuffle(temp_seq)
-        forced_sequence = temp_seq
+        # Start with a few non-winning calls
+        initial_calls_count = total_calls_before_win - len(win_nums)
+        initial_calls_count = max(5, initial_calls_count) # Ensure at least 5 random calls first
+        
+        initial_calls = other_nums[:initial_calls_count]
+        remaining_non_win = other_nums[initial_calls_count:]
+        
+        # Add the winning numbers
+        forced_sequence = initial_calls + win_nums
+        random.shuffle(forced_sequence) # Shuffle the first N calls to mix winners
 
+        # Add the rest of the numbers for calls after the win
+        final_sequence = forced_sequence + remaining_non_win
+    else:
+        # Organic game: No bots, run fully random
+        random.shuffle(all_possible_nums)
+        final_sequence = all_possible_nums
+    
     # Init Messages - Board (Top) and Card (Bottom)
     for pid in real_pids:
-        # 1. Send Board Message (Will display calling number and history)
-        bm = await context.bot.send_message(pid, "⏳ **የቢንጎ ሰሌዳ እየተጫነ ነው...**", parse_mode='Markdown')
+        # 1. Send Board Message (Initial state)
+        initial_board_text = get_board_display_text("ጨዋታው ሊጀመር ነው...", [])
+        bm = await context.bot.send_message(pid, initial_board_text, parse_mode='Markdown')
         game_data['board_messages'][pid] = bm.message_id
         
         # 2. Send Card Message (The interactive card)
@@ -474,10 +512,9 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
         kb = build_card_keyboard(card, game_id, cm.message_id)
         await context.bot.edit_message_reply_markup(chat_id=pid, message_id=cm.message_id, reply_markup=kb)
 
-
     await asyncio.sleep(2) # Initial pause
 
-    for num in forced_sequence:
+    for num in final_sequence:
         if game_data['status'] != 'running': break
         
         game_data['called'].append(num)
@@ -485,6 +522,8 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
         call_text = f"{col}-{num}"
         
         # 1. Update internal card states (real players and bots)
+        is_bot_winner_call = False
+        
         for pid in real_pids:
             c_pos = get_card_position(game_data['player_cards'][pid], num)
             if c_pos[0] is not None: game_data['player_cards'][pid]['called'][c_pos] = True
@@ -496,16 +535,16 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
                     bdata['card']['called'][c_pos] = True
                     # Bots mark called numbers immediately
                     bdata['card']['marked'][c_pos] = True 
+                    
+                    if bid == winning_bot_id:
+                        is_bot_winner_call = True
 
         # 2. TTS Audio Call
         audio = await call_gemini_tts(call_text)
         
-        # 3. Update Board Message (Calling number and history)
-        hist_txt = format_history(game_data['called'][:-1]) # Previous numbers only
-        current_call_txt = f"🗣 **አሁን የሚጠራ ቁጥር:** {call_text}"
-        history_display = f"{EMOJI_HISTORY} **የተጠሩ ቁጥሮች:**\n{hist_txt}"
-        
-        board_text = f"{current_call_txt}\n\n{history_display}"
+        # 3. Update Board Message (Current call and history)
+        # History includes the LATEST number
+        board_text = get_board_display_text(call_text, game_data['called'])
 
         for pid in real_pids:
             # Board (Calling and History)
@@ -513,7 +552,7 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
             except: pass
 
             # Send Voice/Text
-            caption_text = f"📢 **አዲስ ጥሪ:** {call_text}"
+            caption_text = f"🗣 **አዲስ ጥሪ:** {call_text}"
             if audio:
                 try: 
                     audio.seek(0)
@@ -531,14 +570,22 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
             try: await context.bot.edit_message_reply_markup(chat_id=pid, message_id=game_data['card_messages'][pid], reply_markup=kb)
             except: pass
 
-        # 4. Check Bot Win
-        if winning_bot_id and check_win(bot_players[winning_bot_id]['card']):
+        # 4. Check Bot Win (Only check for the winning bot on its winning number calls)
+        if winning_bot_id and is_bot_winner_call and check_win(bot_players[winning_bot_id]['card']):
             await finalize_win(context, game_id, winning_bot_id, True)
             return
+
+        # 5. Check Real Player Win (If a real player wins before the bot, let them)
+        for pid in real_pids:
+            if check_win(game_data['player_cards'][pid]):
+                await finalize_win(context, game_id, pid, False)
+                return
+
 
         await asyncio.sleep(CALL_DELAY)
 
     if game_data['status'] == 'running':
+        # If the sequence finishes and no one has won, declare no winner.
         await finalize_win(context, game_id, None, False)
 
 
@@ -563,19 +610,19 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
                f"👤 አሸናፊ: **{w_name}**\n"
                f"💰 ሽልማት: **{prize:.2f} ብር**\n"
                f"📉 የቤት ቅነሳ: {revenue:.2f} ብር\n"
-               f"ጨዋታው ተጠናቋል።")
+               f"ጨዋታው ተጠናቋል። **አዲሱን ጨዋታ ለመጀመር /play ይጫኑ!**")
     else:
         # Real player win
         data = get_user_data(winner_id)
         w_name = f"{data.get('first_name')} (ID: {winner_id})"
-        # Update balance and log transaction
+        # Update balance and log transaction (Balance integrity maintained)
         update_balance(winner_id, prize, transaction_type='Win', description=f"Bingo prize for game {game_id}")
         
         msg = (f"🥳 **እውነተኛ ቢንጎ!**\n"
                f"👤 አሸናፊ: **{w_name}**\n"
                f"💰 ሽልማት: **{prize:.2f} ብር** (ወደ ሒሳብዎ ገብቷል)\n"
                f"📉 የቤት ቅነሳ: {revenue:.2f} ብር\n"
-               f"ጨዋታው ተጠናቋል።")
+               f"ጨዋታው ተጠናቋል። **አዲሱን ጨዋታ ለመጀመር /play ይጫኑ!**")
            
     for pid in g['players']:
         await context.bot.send_message(pid, msg, parse_mode='Markdown')
@@ -597,7 +644,7 @@ async def start(u, c):
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     bal = get_user_data(user_id).get('balance', 0)
-    msg = f"💳 **የእርስዎ ቀሪ ሒሳብ:**\n\n**{bal:.2f} ብር**"
+    msg = f"💳 **የእርስዎ ቀሪ ሒሳብ (/balance):**\n\n**{bal:.2f} ብር**"
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def ap_dep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -645,7 +692,7 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text(f"❌ እባክዎ ከ 1 እስከ {MAX_PRESET_CARDS} ባለው ክልል ውስጥ ትክክለኛ ቁጥር ያስገቡ።")
             return GET_CARD_NUMBER # Stay in conversation
         
-        # Deduct balance and join lobby
+        # Deduct balance and join lobby (Balance integrity maintained)
         update_balance(user_id, -CARD_COST, transaction_type='Card Purchase', description=f"Card #{card_num} purchase")
         PENDING_PLAYERS[user_id] = card_num
         
@@ -669,7 +716,7 @@ async def cancel_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     await update.message.reply_text("የካርድ መምረጥ ሂደት ተሰርዟል።")
     return ConversationHandler.END
 
-# --- /quickplay (Unchanged, but now works because it's a CommandHandler) ---
+# --- /quickplay (Now fully functional) ---
 async def quickplay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the /quickplay command by selecting a random card number."""
     user_id = update.effective_user.id
@@ -737,7 +784,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         g = ACTIVE_GAMES[gid]
         card = g['player_cards'].get(uid)
         
+        # Check for real player win immediately (even if bot is meant to win later)
         if check_win(card):
+            # If a real player wins, let them win (prioritized over bot win)
             await finalize_win(context, gid, uid, False)
         else:
             await q.answer("❌ የተሳሳተ ቢንጎ! ሁሉንም 5 አስፈላጊ ካሬዎች ምልክት ማድረጉን ያረጋግጡ።")
@@ -758,7 +807,7 @@ async def lobby_countdown(ctx, chat_id, msg_id):
         
     await start_new_game(ctx)
 
-# --- INFORMATIONAL COMMANDS (Now fully operational) ---
+# --- INFORMATIONAL COMMANDS (Unchanged) ---
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays user's game statistics: games played and wins."""
@@ -909,7 +958,7 @@ async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"💵 **ገንዘብ ለማንሳት (/withdraw)**\n\n"
         f"የእርስዎ ወቅታዊ ቀሪ ሒሳብ: **{bal:.2f} ብር**\n"
         f"ዝቅተኛው የማንሳት መጠን: **{MIN_WITHDRAW:.2f} ብር**\n\n"
-        f"**ለማንሳት የሚፈልጉትን የብር መጠን ያስገቡ** (ለምሳሌ: 120):"
+        f"**ለማንሳት የሚፈልጉትን የብር መጠን ያስገቡ** (ለምሳሌ: 120):\n\n**ሰርዝ:** ሂደቱን ለማቋረጥ /cancel ይጠቀሙ።"
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
     return GET_WITHDRAW_AMOUNT
@@ -942,7 +991,7 @@ async def get_telebirr_account(update: Update, context: ContextTypes.DEFAULT_TYP
     amount = context.user_data['withdraw_amount']
     user_id = update.effective_user.id
     
-    # 1. Update balance (deduct the amount immediately and log transaction)
+    # 1. Update balance (deduct the amount immediately and log transaction - Balance integrity maintained)
     update_balance(user_id, -amount, transaction_type='Withdrawal Request', description=f"Telebirr {telebirr_account}")
     
     # 2. Prepare and send message to admin
@@ -1023,7 +1072,7 @@ def main():
     )
     app.add_handler(withdraw_conv_handler)
     
-    # --- 2. Simple Command Handlers (Now guaranteed to work) ---
+    # --- 2. Simple Command Handlers ---
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("quickplay", quickplay_command)) 
