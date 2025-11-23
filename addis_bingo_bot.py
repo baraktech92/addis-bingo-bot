@@ -1,9 +1,7 @@
-# Addis (አዲስ) Bingo Bot - V30: Improved Deposit Flow & Clean Board Display
-# Based on V29, with the following critical changes:
-# 1. Deposit Flow Improvement: Allows users to send receipt images/documents.
-#    The bot forwards the receipt and User ID to the admin for manual approval.
-# 2. Clean Board Display: Only shows the current call and the immediate previous call.
-# 3. TTS Feature: Confirmed the existing TTS implementation for called numbers is active.
+# Addis (አዲስ) Bingo Bot - V31: Clean Call & Prominent Win Announcement
+# Based on V30, with the following critical changes:
+# 1. Clean Call: Removed the text caption from the TTS voice message to stop listing called numbers repetitively.
+# 2. Prominent Win Announcement: Enhanced the final win message with more visible emojis and strong formatting.
 
 import os
 import logging
@@ -412,7 +410,7 @@ def build_card_keyboard(card, game_id, msg_id):
 
 def get_board_display_text(current_call_text: str, called_history: list) -> str:
     """
-    V30 Change: Displays the current call prominently and only the immediate previous call.
+    V30/V31: Displays the current call prominently and only the immediate previous call.
     Removes vertical history listing for a faster, cleaner display.
     """
     
@@ -522,8 +520,6 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
         forced_sequence = initial_calls + win_nums
         random.shuffle(forced_sequence)
         
-        final_sequence = forced_sequence + remaining_non_win
-        
         last_win_num = win_nums[-1] 
         bot_win_call_index = forced_sequence.index(last_win_num)
         
@@ -591,8 +587,8 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
             if audio:
                 try: 
                     audio.seek(0)
-                    # TTS audio is sent here, fulfilling the user's request.
-                    await context.bot.send_voice(pid, InputFile(audio, filename='bingo_call.wav'), caption=f"🗣️ **የተጠራ ቁጥር:** {call_text}", parse_mode='Markdown')
+                    # V31 CHANGE: Removed caption to stop repetitive text listing, voice remains.
+                    await context.bot.send_voice(pid, InputFile(audio, filename='bingo_call.wav')) 
                 except Exception as e: 
                     logger.error(f"Failed to send voice: {e}")
             else:
@@ -653,10 +649,11 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
         msg = f"😔 **ጨዋታው ተጠናቋል!**\nቢንጎ አላገኘንም። {total:.2f} ብር ያለው ሽልማት ቀጣይ ጨዋታ ይዞ ይቀጥላል።"
     elif is_bot:
         w_name = g['bot_players'][winner_id]['name']
-        msg = (f"{EMOJI_BINGO} **ቢንጎ!**\n"
-               f"👤 አሸናፊ: **{w_name}**\n"
+        # V31 IMPROVEMENT: Make announcement more visible
+        msg = (f"🎉🎉 **BINGO WINNER!** 🎉🎉\n\n"
+               f"👤 አሸናፊ: **{w_name}** (Bot)\n"
                f"💰 ሽልማት: **{prize:.2f} ብር**\n"
-               f"📉 የቤት ቅነሳ: {revenue:.2f} ብር\n"
+               f"📉 የቤት ቅነሳ: {revenue:.2f} ብር\n\n"
                f"ጨዋታው ተጠናቋል። **አዲሱን ጨዋታ ለመጀመር /play ይጫኑ!**")
     else:
         # Real player win (ONLY possible in organic mode or if bot win fails)
@@ -665,10 +662,10 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
         # Update balance and log transaction (Balance integrity maintained)
         update_balance(winner_id, prize, transaction_type='Win', description=f"Bingo prize for game {game_id}")
         
-        msg = (f"🥳 **እውነተኛ ቢንጎ!**\n"
-               f"👤 አሸናፊ: **{w_name}**\n"
-               f"💰 ሽልማት: **{prize:.2f} ብር** (ወደ ሒሳብዎ ገብቷል)\n"
-               f"📉 የቤት ቅነሳ: {revenue:.2f} ብር\n"
+        # V31 IMPROVEMENT: Make announcement more visible
+        msg = (f"🌟🏆 **BIG BINGO WINNER!!!** 🏆🌟\n\n"
+               f"🥳 **እውነተኛ አሸናፊ (REAL WINNER):** **{w_name}**\n"
+               f"💰 **ትልቅ ሽልማት (GRAND PRIZE):** **{prize:.2f} ብር** (ወደ ሒሳብዎ ገብቷል)\n\n"
                f"ጨዋታው ተጠናቋል። **አዲሱን ጨዋታ ለመጀመር /play ይጫኑ!**")
            
     # 3. Clean up display and send final message
