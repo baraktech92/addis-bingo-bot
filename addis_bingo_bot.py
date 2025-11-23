@@ -1,7 +1,9 @@
-# Addis (አዲስ) Bingo Bot - V31: Clean Call & Prominent Win Announcement
-# Based on V30, with the following critical changes:
-# 1. Clean Call: Removed the text caption from the TTS voice message to stop listing called numbers repetitively.
-# 2. Prominent Win Announcement: Enhanced the final win message with more visible emojis and strong formatting.
+# Addis (አዲስ) Bingo Bot - V32: Game Reliability & Win Guarantee
+# Changes:
+# 1. Game Length Fix (Stealth Mode): Reworked sequence generation to ensure a full 75-number game,
+#    guaranteeing the bot wins within the first ~30 calls, preventing premature game end/stall.
+# 2. Prominent Announcement: Enhanced the "No Winner" message for better visibility.
+# 3. TTS Error: Added note on GEMINI_API_KEY environment issue.
 
 import os
 import logging
@@ -32,6 +34,7 @@ TOKEN = os.environ.get('TELEGRAM_TOKEN')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 V2_SECRETS = os.environ.get('V2_SECRETS')
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME') 
+# NOTE TO USER: If TTS is not working, ensure GEMINI_API_KEY is correctly set in your environment variables.
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '') 
 
 TELEBIRR_ACCOUNT = "0927922721"
@@ -322,6 +325,7 @@ async def call_gemini_tts(text: str) -> io.BytesIO | None:
         return None
     
     if not GEMINI_API_KEY:
+        # User reported this error. This indicates an environment configuration issue.
         logger.error("TTS skipped: GEMINI_API_KEY is not set. Please configure the environment variable.")
         return None
 
@@ -344,30 +348,44 @@ async def call_gemini_tts(text: str) -> io.BytesIO | None:
         "model": "gemini-2.5-flash-preview-tts"
     }
 
-    try:
-        # Use asyncio.to_thread for the synchronous requests call
-        response = await asyncio.to_thread(lambda: requests.post(
-            TTS_URL, 
-            headers={'Content-Type': 'application/json'}, 
-            data=json.dumps(payload), 
-            timeout=8
-        ))
-        
-        if response.status_code == 200:
-            data = response.json()
-            candidate = data.get('candidates', [{}])[0]
-            part = candidate.get('content', {}).get('parts', [{}])[0]
+    # Added robust retry logic using exponential backoff for the synchronous requests call
+    MAX_RETRIES = 3
+    DELAY = 1
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Use asyncio.to_thread for the synchronous requests call
+            response = await asyncio.to_thread(lambda: requests.post(
+                TTS_URL, 
+                headers={'Content-Type': 'application/json'}, 
+                data=json.dumps(payload), 
+                timeout=8
+            ))
             
-            if 'inlineData' in part and part['inlineData'].get('data'):
-                pcm = base64.b64decode(part['inlineData']['data'])
-                return create_wav_bytes(pcm)
+            if response.status_code == 200:
+                data = response.json()
+                candidate = data.get('candidates', [{}])[0]
+                part = candidate.get('content', {}).get('parts', [{}])[0]
+                
+                if 'inlineData' in part and part['inlineData'].get('data'):
+                    pcm = base64.b64decode(part['inlineData']['data'])
+                    return create_wav_bytes(pcm)
+                else:
+                    logger.error(f"TTS API returned 200 but missing audio data: {data}")
             else:
-                logger.error(f"TTS API returned 200 but missing audio data: {data}")
-        else:
-            logger.error(f"TTS API call failed with status {response.status_code}: {response.text}")
-
-    except Exception as e:
-        logger.error(f"TTS API call error: {e}")
+                logger.error(f"TTS API call failed with status {response.status_code}: {response.text}")
+            
+        except Exception as e:
+            logger.error(f"TTS API call error on attempt {attempt + 1}: {e}")
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(DELAY * (2 ** attempt))
+            else:
+                logger.error("TTS failed after all retries.")
+                return None
+        
+        # If response was successful but didn't return audio, still retry if status code allows
+        if response and response.status_code == 200:
+            break
+            
     return None
 
 # --- Amharic Numbers ---
@@ -410,8 +428,7 @@ def build_card_keyboard(card, game_id, msg_id):
 
 def get_board_display_text(current_call_text: str, called_history: list) -> str:
     """
-    V30/V31: Displays the current call prominently and only the immediate previous call.
-    Removes vertical history listing for a faster, cleaner display.
+    Displays the current call prominently and only the immediate previous call.
     """
     
     # 1. Previous Call (Second to last number in the full history)
@@ -495,40 +512,49 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
         # Note: pay_referrer_bonus is a sync function accessing Firestore
         pay_referrer_bonus(pid) 
         
-    winning_bot_id = None
     all_possible_nums = list(range(1, 76))
-    final_sequence = []
     
-    # --- Bot Win Strategy Enhancement ---
-    if bot_players:
+    # --- V32 FIX: Robust Sequence Generation (Guarantees full 75 calls in stealth mode) ---
+    is_stealth_mode = len(g['players']) < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME
+    final_sequence = []
+
+    if is_stealth_mode and bot_players:
         winning_bot_id = list(bot_players.keys())[0]
+        g['winning_bot_id'] = winning_bot_id
         w_card = bot_players[winning_bot_id]['card']
+        
         # The bot will win on a row (e.g., first row, col 0-4)
         win_nums = [get_card_value(w_card, c, 0) for c in range(5) if c != 2 or w_card['data'].get('N')]
-        win_nums = [x for x in win_nums if x != "FREE"]
+        win_nums = [x for x in win_nums if x != "FREE"] # 5 winning numbers
         
-        total_calls_before_win = random.randint(10, 20)
+        # 1. Decide the win timing (more calls for a longer game)
+        total_calls_at_win = random.randint(20, 30) 
+        
+        # 2. Get other numbers (75 - 5 = 70)
         other_nums = [n for n in all_possible_nums if n not in win_nums]
         random.shuffle(other_nums)
         
-        initial_calls_count = total_calls_before_win - len(win_nums)
-        initial_calls_count = max(5, initial_calls_count)
+        # 3. Create the winning call index list (includes the 5 win_nums)
+        # We need (total_calls_at_win - 5) non-win numbers for the initial block
+        initial_non_win_count = max(0, total_calls_at_win - 5)
         
-        initial_calls = other_nums[:initial_calls_count]
-        remaining_non_win = other_nums[initial_calls_count:]
+        win_sequence_block = other_nums[:initial_non_win_count] + win_nums
+        random.shuffle(win_sequence_block)
         
-        forced_sequence = initial_calls + win_nums
-        random.shuffle(forced_sequence)
-        
+        # 4. Determine the actual index of the last winning number in the shuffled block
         last_win_num = win_nums[-1] 
-        bot_win_call_index = forced_sequence.index(last_win_num)
-        
-        g['winning_bot_id'] = winning_bot_id
-        g['bot_win_call_index'] = bot_win_call_index + 1 
+        g['bot_win_call_index'] = win_sequence_block.index(last_win_num) + 1 # +1 for 1-based index
         g['bot_win_delay_counter'] = BOT_WIN_DELAY_CALLS 
-        logger.info(f"Bot {winning_bot_id} will get Bingo at call {g['bot_win_call_index']} and wait {BOT_WIN_DELAY_CALLS} calls.")
+        
+        # 5. Final sequence is the win block + the rest of the numbers (guarantees 75 calls)
+        remaining_non_win = other_nums[initial_non_win_count:]
+        
+        # The final sequence contains all 75 numbers, shuffled.
+        final_sequence = win_sequence_block + remaining_non_win
+        logger.info(f"Stealth game length: {len(final_sequence)}. Bot wins at call {g['bot_win_call_index']} (plus delay).")
+        
     else:
-        # Organic game: No bots
+        # Organic game (5+ players): No bots, regular shuffle
         random.shuffle(all_possible_nums)
         final_sequence = all_possible_nums
         g['winning_bot_id'] = None
@@ -587,7 +613,7 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
             if audio:
                 try: 
                     audio.seek(0)
-                    # V31 CHANGE: Removed caption to stop repetitive text listing, voice remains.
+                    # Removed caption to stop repetitive text listing, voice remains.
                     await context.bot.send_voice(pid, InputFile(audio, filename='bingo_call.wav')) 
                 except Exception as e: 
                     logger.error(f"Failed to send voice: {e}")
@@ -602,8 +628,6 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
             except: pass
 
         # 4. Check Bot Win (with Stealth Delay and CRITICAL TIMING ENFORCEMENT)
-        is_stealth_mode = len(g['players']) < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME
-        
         if is_stealth_mode and g['winning_bot_id']:
             winner_card = bot_players[g['winning_bot_id']]['card']
             
@@ -611,8 +635,8 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
                 if g['bot_win_delay_counter'] <= 0:
                     if check_win(winner_card):
                         await finalize_win(context, game_id, g['winning_bot_id'], True)
-                        return
-                
+                        return # Game ends immediately on bot win
+
                 # Decrement delay counter only if the bot's call index is met
                 if g['bot_win_delay_counter'] > 0:
                     g['bot_win_delay_counter'] -= 1
@@ -629,6 +653,7 @@ async def run_game_loop(context, game_id, real_pids, bot_players):
         await asyncio.sleep(CALL_DELAY)
 
     if g['status'] == 'running':
+        # If the loop finished (all 75 numbers called) and no one won
         await finalize_win(context, game_id, None, False)
 
 
@@ -646,10 +671,14 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
         update_game_stats(pid, is_win= (pid == winner_id and not is_bot) )
         
     if winner_id is None:
-        msg = f"😔 **ጨዋታው ተጠናቋል!**\nቢንጎ አላገኘንም። {total:.2f} ብር ያለው ሽልማት ቀጣይ ጨዋታ ይዞ ይቀጥላል።"
+        # V32 IMPROVEMENT: Prominent "No Winner" message
+        msg = (f"💔 **ቢንጎ የለም! (NO BINGO)** 💔\n\n"
+               f"በዚህ ዙር ማንም ቢንጎ አላገኘም።\n"
+               f"💰 የሽልማት ገንዘብ: **{total:.2f} ብር** ቀጣይ ጨዋታ ይዞ ይቀጥላል።\n\n"
+               f"**አዲሱን ጨዋታ ለመጀመር /play ይጫኑ!**")
     elif is_bot:
         w_name = g['bot_players'][winner_id]['name']
-        # V31 IMPROVEMENT: Make announcement more visible
+        # V31: Make announcement more visible
         msg = (f"🎉🎉 **BINGO WINNER!** 🎉🎉\n\n"
                f"👤 አሸናፊ: **{w_name}** (Bot)\n"
                f"💰 ሽልማት: **{prize:.2f} ብር**\n"
@@ -662,7 +691,7 @@ async def finalize_win(context, game_id, winner_id, is_bot=False):
         # Update balance and log transaction (Balance integrity maintained)
         update_balance(winner_id, prize, transaction_type='Win', description=f"Bingo prize for game {game_id}")
         
-        # V31 IMPROVEMENT: Make announcement more visible
+        # V31: Make announcement more visible
         msg = (f"🌟🏆 **BIG BINGO WINNER!!!** 🏆🌟\n\n"
                f"🥳 **እውነተኛ አሸናፊ (REAL WINNER):** **{w_name}**\n"
                f"💰 **ትልቅ ሽልማት (GRAND PRIZE):** **{prize:.2f} ብር** (ወደ ሒሳብዎ ገብቷል)\n\n"
