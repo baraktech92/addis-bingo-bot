@@ -1,4 +1,3 @@
-
 import os
 import logging
 import asyncio
@@ -21,8 +20,9 @@ from typing import Dict, Any, Optional
 # Retrieve Telegram Bot Token from environment variable
 # NOTE: Replace "YOUR_TELEGRAM_BOT_TOKEN_HERE" with your actual bot token or set it via environment variables.
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE") 
-ADMIN_USER_ID = 123456789 # !!! IMPORTANT: REPLACE WITH YOUR ACTUAL ADMIN USER ID !!!
-TELEBIRR_ACCOUNT = "0912345678" # Account for user deposits (Amharic: ለተጠቃሚዎች ገንዘብ ማስገቢያ አካውንት)
+# !!! IMPORTANT: Updated ADMIN_USER_ID to the provided numeric ID for @Addiscoders !!!
+ADMIN_USER_ID = 5887428731 # Admin ID for @Addiscoders 
+TELEBIRR_ACCOUNT = "0927922721" # Account for user deposits (Amharic: ለተጠቃሚዎች ገንዘብ ማስገቢያ አካውንት)
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", None)
 
 # Game & Financial Constants
@@ -108,7 +108,8 @@ def generate_bingo_card_set() -> Dict[int, Dict[str, Any]]:
         # Center square (N-3) is FREE
         N[2] = 0 
         
-        card_set[i] = {'B': B, 'I': I, 'N': N, 'G': G, 'O': O}
+        card_set[i] = {'B': B, 'I': N, 'N': N, 'G': G, 'O': O} # Corrected error: I was assigned N's range
+        card_set[i]['I'] = I # Re-assign I correctly
         
     return card_set
 
@@ -151,6 +152,8 @@ def build_card_keyboard(card: Dict[str, Any], game_id: str, message_id: int) -> 
 
             if value == "FREE":
                 text = "⭐"
+                # Ensure FREE space is marked immediately and permanently
+                card['marked'][(2, 2)] = True 
             elif is_marked:
                 text = f"{value} ✅"
             elif is_called:
@@ -339,6 +342,12 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # 1. Prepare player cards
     player_cards: Dict[int, Dict[str, Any]] = {}
     for user_id, card_num in PENDING_PLAYERS.items():
+        # Ensure card number is valid
+        if card_num not in BINGO_CARD_SETS:
+             # Should not happen if generate_bingo_card_set ran
+             logger.error(f"Invalid card number {card_num} for user {user_id}. Skipping.")
+             continue
+
         player_cards[user_id] = {
             'number': card_num,
             'set': BINGO_CARD_SETS[card_num],
@@ -346,6 +355,9 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             'called': {}, # {(col, row): True} - numbers called by the game
             'win_message_id': None # Message ID of the card sent to the player
         }
+        # Mark FREE space (N3) immediately
+        player_cards[user_id]['marked'][(2, 2)] = True
+
 
     # 2. Stealth Mode Setup (Check player count)
     winning_bot_id: Optional[int] = None
@@ -412,9 +424,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 referrer_id = int(context.args[0])
                 if referrer_id != user_id and await get_user_data(referrer_id):
+                    # Only apply bonus if the referrer is a known user
                     update_data['referred_by'] = referrer_id
                     
-                    await update.message.reply_text(f"👋 እንኳን ደህና መጡ! በ ID {referrer_id} ተጋብዘዋል። የመጀመሪያ ጨዋታዎን ሲጫወቱ፣ ጋባዥዎ {REFERRAL_BONUS:.2f} ብር ጉርሻ ያገኛል።")
+                    await update.message.reply_text(f"👋 እንኳን ደህና መጡ! በ ID {referrer_id} ተጋብዘዋል። የመጀመሪያ ጨዋታዎን ሲጫወቱ፣ ጋባዥዎ {REFERRAL_BONUS:.2f} ብር ጉርሻ ያገኛሉ።")
                     
             except ValueError:
                 pass
@@ -634,8 +647,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await q.answer("❌ የተጠሩ (🟢 አረንጓዴ የሆኑ) ቁጥሮችን ብቻ ምልክት ያድርጉ።")
             return
             
-        # Toggle mark state
-        card['marked'][c_pos] = not card['marked'].get(c_pos)
+        # Toggle mark state (FREE space is already marked permanently in build_card_keyboard/start_new_game)
+        if val != "FREE":
+            card['marked'][c_pos] = not card['marked'].get(c_pos)
         
         # Rebuild keyboard and update message
         kb = build_card_keyboard(card, gid, mid)
