@@ -20,7 +20,7 @@ from typing import Dict, Any, Optional
 # Retrieve Telegram Bot Token from environment variable
 # NOTE: Replace "YOUR_TELEGRAM_BOT_TOKEN_HERE" with your actual bot token or set it via environment variables.
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE") 
-# !!! IMPORTANT: Updated ADMIN_USER_ID to the provided numeric ID for @Addiscoders !!!
+# !!! IMPORTANT: Admin User ID for forwarding deposits and access to admin commands !!!
 ADMIN_USER_ID = 5887428731 # Admin ID for @Addiscoders 
 TELEBIRR_ACCOUNT = "0927922721" # Account for user deposits (Amharic: ለተጠቃሚዎች ገንዘብ ማስገቢያ አካውንት)
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", None)
@@ -32,7 +32,7 @@ MIN_WITHDRAW = 100.00
 REFERRAL_BONUS = 10.00
 MAX_PRESET_CARDS = 200 # Total number of unique card patterns available
 MIN_PLAYERS_TO_START = 1 # Minimum players needed to start the lobby countdown
-MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 20 
+MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 20 # CRITICAL: If real players < 20, bot is guaranteed to win
 PRIZE_POOL_PERCENTAGE = 0.80 # 80% of total pot goes to winner (20% house cut)
 BOT_WIN_CALL_THRESHOLD = 30 # Bot is guaranteed to win after this many calls if in stealth mode
 
@@ -45,10 +45,10 @@ ETHIOPIAN_MALE_NAMES = [
     "Kirubel", "Kibrom", "Zewdu", "Geta"
 ] 
 ETHIOPIAN_FEMALE_NAMES = [
-    "Aster", "Eleni", "Hana", "Mekdes", "Rahel", "Selam"
+    "Aster", "Eleni", "Hana", "Mekdes", "Rahel", "Selam", "Sifan", "Marth", "Lydya", "Tsehay", "Saba"
 ] 
-ETHIOPIAN_FATHER_NAMES = ["Tadesse", "Moges", "Gebre", "Abebe", "Negash", "Kassahun", "Asrat", "Haile"]
-ETHIOPIAN_EMOJIS = ["✨", "🚀", "😎", "👾", "🤖", "🔥", "💫"]
+ETHIOPIAN_FATHER_NAMES = ["Tadesse", "Moges", "Gebre", "Abebe", "Negash", "Kassahun", "Asrat", "Haile", "Desta", "Worku"]
+ETHIOPIAN_EMOJIS = ["✨", "🚀", "😎", "👾", "🤖", "🔥", "💫", "🌟", "🦁", "🐅"]
 
 
 # Conversation States (Updated to include Deposit Flow)
@@ -66,7 +66,7 @@ logger.setLevel(logging.INFO)
 # --- CRITICAL CHANGE 1: Data Versioning for Persistency ---
 # Increment this version number when making changes that affect USER_DB structure!
 PREVIOUS_STATE_KEY = "!!!PREVIOUS_STATE_SNAPSHOT!!!" 
-MIGRATION_VERSION = 4.1 # Version incremented for deposit flow update
+MIGRATION_VERSION = 5.0 # Version incremented for deposit fix and stealth update
 
 # In-memory database simulation for user data (Amharic: ለተጠቃሚ መረጃ የማስታወሻ ማስመሰል)
 USER_DB: Dict[int, Dict[str, Any]] = {
@@ -80,7 +80,7 @@ LOBBY_STATE: Dict[str, Any] = {'is_running': False, 'msg_id': None, 'chat_id': N
 BINGO_CARD_SETS: Dict[int, Dict[str, Any]] = {} 
 
 
-# --- 2. Database (In-Memory Simulation) Functions (KEPT FROM V48) ---
+# --- 2. Database (In-Memory Simulation) Functions ---
 
 def _ensure_balance_persistency():
     """
@@ -226,7 +226,7 @@ def update_balance(user_id: int, amount: float, transaction_type: str, descripti
     logger.info(f"TX | User {user_id} | Type: {transaction_type} | Amount: {amount:.2f} | New Bal: {new_balance:.2f}")
     _save_current_state() # CRITICAL: Save after every transaction
 
-# --- 3. Game Loop and Flow Functions (KEPT FROM V48) ---
+# --- 3. Game Loop and Flow Functions ---
 
 async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: int, is_bot_win: bool):
     """Handles prize distribution, cleanup, and announcement."""
@@ -239,19 +239,16 @@ async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: 
     house_cut = total_pot * (1 - PRIZE_POOL_PERCENTAGE)
     prize_money = total_pot * PRIZE_POOL_PERCENTAGE # 80%
     
-    # 1. Get winner name and ID for announcement
+    # 1. Get winner name for announcement
     winner_data = await get_user_data(winner_id)
-    winner_name = winner_data.get('first_name', f"User {winner_id}")
-    # CRITICAL CHANGE: Display winner ID (Bot ID is negative but displayed as a recognizable string)
-    winner_display_id = f"ID: `{winner_id}`" if winner_id > 0 else f"Bot ID: `STEALTH-{abs(winner_id)}`"
+    winner_name = winner_data.get('first_name', "ያልታወቀ ተጫዋች") # CRITICAL: No ID, just name
 
     # 2. Distribute Winnings (Atomic update) - Only for real players
     if not is_bot_win and winner_id > 0:
         # Use 'Game-Win' type for easier history cleanup
         update_balance(winner_id, prize_money, transaction_type='Game-Win', description=f"Game {game_id} Winner")
         
-    # 3. CRITICAL CHANGE: History Cleanup (Remove game-specific transactions)
-    # This fulfills the user requirement to remove content after one game finishes (game history)
+    # 3. History Cleanup (Remove game-specific transactions)
     players_to_clean = [uid for uid in game['players'] if uid > 0] # Only clean real players
     for uid in players_to_clean:
         user_data = USER_DB.get(uid)
@@ -261,13 +258,13 @@ async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: 
                 tx for tx in user_data['tx_history'] 
                 if tx['type'] not in ['Game-Card Purchase', 'Game-Win']
             ]
-            _save_current_state() # Save after cleaning history
+            _save_current_state() 
 
         
-    # 4. Announcement Message
+    # 4. Announcement Message (CRITICAL: Removed ID from announcement)
     announcement = (
         f"🎉🎉 ቢንጎ! ጨዋታው አብቅቷል! 🎉🎉\n\n"
-        f"🏆 አሸናፊ: **{winner_name}** ({winner_display_id})\n\n"
+        f"🏆 አሸናፊ: **{winner_name}**\n\n"
         f"👥 ጠቅላላ ተጫዋቾች: {total_players} ሰው\n"
         f"💵 ጠቅላላ ገንዳ: {total_pot:.2f} ብር\n"
         f"✂️ የቤት ድርሻ (20%): {house_cut:.2f} ብር\n"
@@ -362,7 +359,7 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
             game['called_numbers'] = called_numbers 
             
             msg_text = (
-                f"🎲 የቢንጎ ጨዋታ በሂደት ላይ... (ካርድ {len(called_numbers)}/75)\n\n"
+                f"🎲 የቢንጎ ጨዋታ በሂደት ላይ... (ጥሪ {len(called_numbers)}/75)\n\n"
                 f"📣 የተጠራው ቁጥር: **{get_bingo_call(called_num)}**\n\n"
                 f"🔁 የመጨረሻዎቹ 5 ጥሪዎች:\n`{', '.join(last_5_calls)}`"
             )
@@ -387,12 +384,14 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
                     for r in range(5):
                         winning_card['marked'][(c, r)] = True
                         
+                # CRITICAL: Finalize win with is_bot_win=True
                 await finalize_win(ctx, game_id, winning_bot_id, True)
                 return 
             
             await asyncio.sleep(2) 
             
         if game_id in ACTIVE_GAMES:
+            # Game ended without a BINGO call before numbers ran out (very rare)
             await ctx.bot.send_message(main_chat_id, "⚠️ ጨዋታው አብቅቷል። ምንም አሸናፊ አልተገኘም። ገንዘቡ ወደ ተጫዋቾች ተመላሽ ይደረጋል።")
             ACTIVE_GAMES.pop(game_id, None)
 
@@ -439,7 +438,8 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # 2. Promotional Mode Setup (Check player count)
     real_player_count = len(real_players)
     winning_bot_id: Optional[int] = None
-    # CRITICAL: Trigger bot injection if 19 or fewer players
+    
+    # CRITICAL: Trigger bot injection if 19 or fewer real players
     is_promotional_game = real_player_count < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME
 
     all_players = list(real_players) # Start with real players
@@ -492,9 +492,9 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         'start_time': time.time()
     }
     
-    # 4. Send initial announcement message (CRITICAL: Summarized message, no user IDs)
+    # 4. Send initial announcement message (CRITICAL: Summarized message, counts bots as players)
     
-    total_players = len(all_players) # This includes bots
+    total_players = len(all_players) # This includes bots AND real players
     total_pot = total_players * CARD_COST 
     house_cut = total_pot * (1 - PRIZE_POOL_PERCENTAGE) # 20% cut
     prize_money = total_pot * PRIZE_POOL_PERCENTAGE # 80% for the winner
@@ -506,7 +506,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         
         game_msg_text = (
             f"🚨 **ቢንጎ ጨዋታ #{game_id} ተጀምሯል!** 🚨\n\n"
-            # User requirement: only show total number, not IDs
+            # CRITICAL: Show combined count (bots + real players)
             f"📢 አሁን ያለን ተጫዋች: **እርስዎ እና ሌሎች {others_count} ተጫዋቾች ተቀላቅለዋል!**\n" 
             f"💵 ጠቅላላ የሽልማት ገንዳ: **{total_pot:.2f} ብር** ({total_players} ተጫዋቾች x {CARD_COST:.2f} ብር)\n"
             f"✂️ የቤት ድርሻ (20%): {house_cut:.2f} ብር\n"
@@ -536,7 +536,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         
         card_message_text = (
             f"**ካርድ ቁጥር #{card['number']}**\n"
-            f"🔥 **ጨዋታው በቅርቡ ይጀምራል!** 🔥\n\n" 
+            f"🔥 **ጨዋታው በሂደት ላይ ነው!** 🔥\n\n" 
             f"🟢 ቁጥር ሲጠራ 'Mark' ቁልፉን ይጫኑ።\n"
             f"✅ 5 አግድም፣ ቁመታዊ ወይም ሰያፍ መስመር ሲሞላ '🚨 BINGO 🚨' የሚለውን ይጫኑ።"
         )
@@ -634,7 +634,7 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
-# --- NEW DEPOSIT FLOW HANDLERS (CRITICAL UPDATE) ---
+# --- DEPOSIT FLOW HANDLERS (FIXED) ---
 
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the deposit conversation, providing Telebirr details."""
@@ -667,9 +667,9 @@ async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data['deposit_amount'] = amount
         
         await update.message.reply_text(
-            f"✅ {amount:.2f} ብር ገቢ ለማድረግ ጠይቀዋል።\n\n"
-            "3. አሁን፣ **እባክዎን ከቴሌብር የክፍያ ማረጋገጫ (Receipt) ቅጂ ወይም Screenshot ይላኩልኝ**።\n"
-            "ማረጋገጫው እስኪላክልኝ ድረስ በሌላ ነገር መጻፍ አይችሉም።"
+            f"✅ **{amount:.2f} ብር** ገቢ ለማድረግ ጠይቀዋል።\n\n"
+            "3. **አስፈላጊ:** እባክዎን የክፍያ ማረጋገጫውን (receipt) ቅጂ ወይም Screenshot ወዲያውኑ ይላኩልኝ።\n"
+            "ይህን ፋይል ብቻ እጠብቃለሁ።"
         )
         return WAITING_FOR_RECEIPT
         
@@ -688,6 +688,9 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Check if the message contains a photo or a document
     if update.message.photo or update.message.document:
+        
+        # Log the transaction as pending BEFORE forwarding
+        update_balance(user.id, 0, 'Deposit Pending', f"Deposit of {deposit_amount:.2f} Birr pending admin approval")
         
         admin_message = (
             f"💰 **አዲስ የገንዘብ ማስገቢያ ጥያቄ** 💰\n"
@@ -717,9 +720,6 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
 
             # 2. Notify the user
-            # Log the transaction as pending
-            update_balance(user.id, 0, 'Deposit Pending', f"Deposit of {deposit_amount:.2f} Birr pending admin approval")
-
             await update.message.reply_text(
                 "✅ የክፍያ ማረጋገጫዎ በተሳካ ሁኔታ ለአስተዳዳሪው ተልኳል።\n"
                 f"💸 **{deposit_amount:.2f} ብር** ገቢ ለማድረግ እየጠበቁ ነው።\n"
@@ -731,16 +731,18 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             
         except Exception as e:
             logger.error(f"Error forwarding receipt to admin {ADMIN_USER_ID}: {e}")
+            # If forwarding fails, put the user back in the waiting state to resend
             await update.message.reply_text("❌ ስህተት ተፈጥሯል። እባክዎ ሾትዎን በመላክ ዳግም ይሞክሩ።")
             return WAITING_FOR_RECEIPT
             
         return ConversationHandler.END
         
     else:
+        # User sent text or something else while waiting for receipt
         await update.message.reply_text("❌ እባክዎ የክፍያ ማረጋገጫውን በ **ፎቶ ወይም በ Document** መልክ ብቻ ይላኩልኝ።")
         return WAITING_FOR_RECEIPT
         
-# --- Placeholder functions for other commands (UNCHANGED logic, but included for completeness) ---
+# --- Placeholder functions for other commands ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message with usage instructions and rules."""
@@ -762,7 +764,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"💰 /deposit - ገንዘብ ለማስገባት (ዝቅተኛው: {MIN_DEPOSIT:.2f} ብር)\n"
         f"🎲 /play - የቢንጎ ካርድ ገዝተው ጨዋታ ለመቀላቀል (ዋጋ: {CARD_COST:.2f} ብር)\n"
         "💳 /balance - ሒሳብዎን ለማየት\n"
-        "📈 /stats - የአሁኑን የጨዋታ ሁኔታ ለማየት\n\n"
+        "📜 /history - የግብይት ታሪክዎን ለማየት\n\n"
         f"{rules_text}"
     )
 
@@ -770,6 +772,7 @@ async def quickplay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await play_command(update, context)
 
 async def cancel_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear() # Clear any pending data
     await update.message.reply_text("የአሁኑ ሂደት ተሰርዟል።")
     return ConversationHandler.END
 
@@ -780,7 +783,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(
         f"💳 የአሁኑ ሒሳብዎ: **{user_data['balance']:.2f} ብር**\n\n"
         f"ገንዘብ ለማስገባት: /deposit\n"
-        f"ገንዘብ ለማውጣት: /withdraw",
+        f"ገንዘብ ለማውጣት: /withdraw (በቅርቡ ይጀምራል)",
         parse_mode='Markdown'
     )
 
@@ -809,7 +812,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# --- ADMIN HANDLERS (UNCAHNGED) ---
+# --- ADMIN HANDLERS ---
 async def check_admin(user_id: int) -> bool:
     return user_id == ADMIN_USER_ID
 
@@ -882,6 +885,7 @@ async def ap_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
         
     broadcast_message = " ".join(context.args)
+    # Filter for all real users (IDs > 0) excluding the admin himself
     user_ids = [uid for uid in USER_DB if isinstance(uid, int) and uid > 0 and uid != ADMIN_USER_ID]
     
     success_count = 0
@@ -1040,6 +1044,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif action == "BINGO":
         if check_win(card):
+            # The game loop will now be interrupted and the winner declared
             asyncio.create_task(finalize_win(context, game_id, user_id, is_bot_win=False))
             await query.edit_message_text("🎉 ቢንጎ! ማሸነፍዎ እየተረጋገጠ ነው። እባክዎ ይጠብቁ።")
         else:
@@ -1059,15 +1064,18 @@ def main():
     
     # --- 1. Conversation Handlers ---
     
-    # Deposit Conversation Handler (NEW)
+    # Deposit Conversation Handler (FIXED)
     deposit_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("deposit", deposit_command)],
         states={
             GET_DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)],
-            # Filter for PHOTO or any DOCUMENT, excluding commands
+            # CRITICAL FIX: Only accept photo or document for the receipt
             WAITING_FOR_RECEIPT: [MessageHandler(filters.PHOTO | filters.Document.ALL & ~filters.COMMAND, handle_receipt)],
         },
         fallbacks=[CommandHandler('cancel', cancel_play)],
+        # Clear data on timeout or end
+        per_user=True, 
+        per_chat=False,
     )
     app.add_handler(deposit_conv_handler)
     
@@ -1091,7 +1099,7 @@ def main():
     # Admin commands 
     app.add_handler(CommandHandler("ap_dep", ap_dep)) 
     app.add_handler(CommandHandler("ap_bal_check", ap_bal_check)) 
-    app.add_handler(CommandHandler("ap_broadcast", ap_broadcast))
+    app.add_handler(CommandHandler("ap_broadcast", ap_broadcast)) # Admin broadcast to all users
 
     # --- 3. Callback Query Handler ---
     app.add_handler(CallbackQueryHandler(handle_callback, pattern='^(MARK|BINGO)'))
