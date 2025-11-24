@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # CRITICAL FIX: Admin User ID for forwarding deposits and access to admin commands
 # !!! CHANGE THIS TO YOUR ACTUAL TELEGRAM USER ID !!!
-ADMIN_USER_ID = 5887428731  # <<<---- REPLACE THIS WITH YOUR REAL TELEGRAM USER ID
+ADMIN_USER_ID = 5887428731  # 
 
 # Configuration values
 GAME_PRICE = 50.0  # Cost to buy one bingo card
