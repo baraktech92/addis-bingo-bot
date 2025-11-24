@@ -40,14 +40,22 @@ MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 20
 PRIZE_POOL_PERCENTAGE = 0.80 # 80% of total pot goes to winner (20% house cut)
 BOT_WIN_CALL_THRESHOLD = 30 # NEW: Bot is guaranteed to win after this many calls if in stealth mode
 
-# NEW: Ethiopian names for bot stealth mode (Amharic: ለቦት ስውር ሁናቴ የኢትዮጵያ ስሞች)
-ETHIOPIAN_BOT_NAMES = [
-    "Abrham", "Aster", "Dawit", "Eleni", "Firaol", "Genet", "Hagos", "Hana",
-    "Kaleb", "Liyu", "Mekdes", "Nathan", "Rahel", "Samuel", "Selam", "Tigist",
-    "Yared", "Zewdu", "Abel", "Saba", "Tewodros", "Yeshi", "Beza", "Gelila",
-    "Tsega", "Nardos", "Ermias", "Moges", "Tadesse", "Hiwot", "Kidus", "Abeba",
-    "Mame", "Lidya", "Aklilu", "Surafel", "Nebiyou", "Fasika", "Melat", "Amanuel"
-]
+# NEW: Ethiopian names for bot stealth mode (Amharic: ለቦት ስውር ሁናቴ የኢትዮጵያ ስሞች) - IMPROVED
+ETHIOPIAN_MALE_NAMES = [
+    "Abel", "Adane", "Biniyam", "Dawit", "Elias", "Firaol", "Getnet", "Henok", "Isaias", 
+    "Kaleb", "Leul", "Million", "Nahom", "Natnael", "Samuel", "Surafel", "Tadele", "Yared", 
+    "Yonatan", "Zerihun", "Amanuel", "Teklu", "Mesfin", "Girmay", "Abiy", "Ephrem", 
+    "Yonas", "Tesfaye", "Tamirat", "Mekonnen", "Fitsum", "Rediet", "Bereket", "Eyob", 
+    "Kirubel", "Kibrom", "Zewdu", "Geta"
+] # 38 male names (approx 86% of total pool)
+
+ETHIOPIAN_FEMALE_NAMES = [
+    "Aster", "Eleni", "Hana", "Mekdes", "Rahel", "Selam"
+] # 6 female names
+
+ETHIOPIAN_FATHER_NAMES = ["Tadesse", "Moges", "Gebre", "Abebe", "Negash", "Kassahun", "Asrat", "Haile"]
+ETHIOPIAN_EMOJIS = ["✨", "🚀", "😎", "👾", "🤖", "🔥", "💫"]
+
 
 # Conversation States
 GET_CARD_NUMBER, GET_DEPOSIT_CONFIRMATION = range(2)
@@ -60,7 +68,7 @@ logger.setLevel(logging.INFO)
 # --- CRITICAL CHANGE 3: Data Versioning for Persistency ---
 # Increment this version number when making changes that affect USER_DB structure!
 PREVIOUS_STATE_KEY = "!!!PREVIOUS_STATE_SNAPSHOT!!!" 
-MIGRATION_VERSION = 2.1 # Current version marker (No change needed for v45 as balance structure is stable)
+MIGRATION_VERSION = 2.0 # Current version marker (No change needed for v46 as balance structure is stable)
 
 # In-memory database simulation for user data (Amharic: ለተጠቃሚ መረጃ የማስታወሻ ማስመሰል)
 USER_DB: Dict[int, Dict[str, Any]] = {
@@ -138,6 +146,50 @@ def _save_current_state():
         'timestamp': time.time()
     }
 
+def _generate_stealth_name(bot_id: int) -> str:
+    """Generates a realistic Ethiopian bot name with suffixes."""
+    
+    # Decide gender skew (~90% Male)
+    is_male = random.random() < 0.90
+    
+    if is_male:
+        base_name = random.choice(ETHIOPIAN_MALE_NAMES)
+    else:
+        base_name = random.choice(ETHIOPIAN_FEMALE_NAMES)
+        
+    # Add a suffix 50% of the time
+    if random.random() < 0.5:
+        suffix_choice = random.randint(1, 3)
+        
+        if suffix_choice == 1:
+            # Add a random number (1-99)
+            base_name += f"_{random.randint(1, 99)}"
+        elif suffix_choice == 2:
+            # Add a common father's name
+            base_name += f" {random.choice(ETHIOPIAN_FATHER_NAMES)}"
+        elif suffix_choice == 3:
+            # Add an emoji
+            base_name += f" {random.choice(ETHIOPIAN_EMOJIS)}"
+            
+    return base_name
+
+async def get_user_data(user_id: int) -> Dict[str, Any]:
+    """Retrieves user data, creating a default entry if none exists. (Amharic: የተጠቃሚ መረጃን ያመጣል)"""
+    # CRITICAL CHANGE for Stealth Mode: Bots should appear as generic players
+    if user_id < 0:
+        # Generate or retrieve cached bot name
+        if user_id not in USER_DB:
+            bot_name = _generate_stealth_name(user_id)
+            USER_DB[user_id] = {'balance': 0.00, 'referred_by': None, 'first_name': bot_name, 'tx_history': []}
+        
+        return USER_DB[user_id].copy()
+        
+    if user_id not in USER_DB:
+        # Simulate initial registration
+        USER_DB[user_id] = {'balance': 0.00, 'referred_by': None, 'first_name': f"User {user_id}", 'tx_history': []}
+        
+    return USER_DB[user_id].copy()
+
 
 def update_user_data(user_id: int, data: Dict[str, Any]):
     """Saves user data atomically. (Amharic: የተጠቃሚ መረጃን ያስቀምጣል)"""
@@ -145,26 +197,6 @@ def update_user_data(user_id: int, data: Dict[str, Any]):
         USER_DB[user_id] = {'balance': 0.00, 'referred_by': None, 'first_name': f"User {user_id}", 'tx_history': []}
     USER_DB[user_id].update(data)
     _save_current_state() # Save after every update
-
-async def get_user_data(user_id: int) -> Dict[str, Any]:
-    """Retrieves user data, creating a default entry if none exists. (Amharic: የተጠቃሚ መረጃን ያመጣል)"""
-    # CRITICAL CHANGE for Stealth Mode: Bots should appear as generic players
-    if user_id < 0:
-        # Bot name should be generic and not reveal identity
-        bot_name_index = abs(user_id)
-        
-        # New: Use Ethiopian names for stealth, cycling through the list
-        name_index = (bot_name_index - 1) % len(ETHIOPIAN_BOT_NAMES)
-        bot_name = ETHIOPIAN_BOT_NAMES[name_index]
-        
-        # Give the bot a consistent name based on its ID
-        return {'balance': 0.00, 'referred_by': None, 'first_name': bot_name, 'tx_history': []}
-        
-    if user_id not in USER_DB:
-        # Simulate initial registration
-        USER_DB[user_id] = {'balance': 0.00, 'referred_by': None, 'first_name': f"User {user_id}", 'tx_history': []}
-        
-    return USER_DB[user_id].copy()
 
 def update_balance(user_id: int, amount: float, transaction_type: str, description: str):
     """Atomically updates user balance and logs transaction. (Amharic: የተጠቃሚ ሂሳብን በቅጽበት ያሻሽላል)"""
@@ -639,18 +671,31 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # 6. Start the Game Loop (Runs in the background)
     asyncio.create_task(run_game_loop(ctx, game_id))
 
-# --- 5. Handler Functions (Start, Play, Cancel, Stats) (UPDATED PLAY FLOW) ---
+# --- 5. Handler Functions (Start, Play, Cancel, Stats) (UPDATED START FLOW) ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a welcome message with usage instructions. (Amharic: የእንኳን ደህና መጣችሁ መልእክት ይልካል)"""
+    """Sends a welcome message with usage instructions and rules. (Amharic: የእንኳን ደህና መጣችሁ መልእክት ይልካል)"""
     user = update.effective_user
+    
+    # Reusing the rules from rules_command for consistency
+    rules_text = (
+        f"🏆 **የአዲስ ቢንጎ ህጎች** 🏆\n\n"
+        f"1. **ካርድ መግዛት:** /play የሚለውን ትዕዛዝ በመጠቀም የሚፈልጉትን የካርድ ቁጥር ይምረጡ። አንድ ካርድ {CARD_COST:.2f} ብር ነው።\n"
+        f"2. **ጨዋታ መጀመር:** ቢያንስ {MIN_PLAYERS_TO_START} ተጫዋቾች ሲኖሩ ጨዋታው ይጀምራል።\n"
+        "3. **የቁጥር ጥሪ:** ቦቱ በየ2 ሰከንዱ ቁጥር ይጠራል (B-1 እስከ O-75)።\n"
+        "4. **መሙላት:** ቁጥሩ በካርድዎ ላይ ካለ፣ አረንጓዴ (🟢) ይሆናል። ወዲያውኑ አረንጓዴውን ቁጥር **Mark** የሚለውን ቁልፍ በመጫን ምልክት ያድርጉበት።\n"
+        "5. **ማሸነፍ:** አምስት ቁጥሮችን በተከታታይ (አግድም፣ ቁመታዊ ወይም ሰያፍ) በፍጥነት የመሙላት የመጀመሪያው ተጫዋች ሲሆኑ፣ **🚨 BINGO 🚨** የሚለውን ቁልፍ ይጫኑ።\n"
+        f"6. **ሽልማት:** አሸናፊው ከጠቅላላው የጨዋታ ገንዳ {PRIZE_POOL_PERCENTAGE*100}% ያሸንፋል።"
+    )
+    
     await update.message.reply_html(
         f"ሰላም {user.mention_html()}! እንኳን ወደ አዲስ ቢንጎ በደህና መጡ።\n\n"
         "ለመጀመር የሚከተሉትን ትዕዛዞች ይጠቀሙ:\n"
         f"💰 /deposit - ገንዘብ ለማስገባት (ዝቅተኛው: {MIN_DEPOSIT:.2f} ብር)\n"
         f"🎲 /play - የቢንጎ ካርድ ገዝተው ጨዋታ ለመቀላቀል (ዋጋ: {CARD_COST:.2f} ብር)\n"
         "💳 /balance - ሒሳብዎን ለማየት\n"
-        "🏆 /rules - የጨዋታውን ህጎች ለማየት"
+        "📈 /stats - የአሁኑን የጨዋታ ሁኔታ ለማየት\n\n"
+        f"{rules_text}"
     )
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -726,11 +771,11 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
         LOBBY_STATE['is_running'] = True
         LOBBY_STATE['chat_id'] = update.effective_chat.id
         
-        # IMPROVEMENT: Show list of current players in the lobby message
+        # IMPROVED MESSAGE: Show the total number of players
         current_players_list = "\n".join([f"- ID: {uid} (Card #{card_num})" for uid, card_num in PENDING_PLAYERS.items()])
         
         await update.message.reply_text(
-            f"📢 አዲስ ጨዋታ ለመጀመር ዝግጁ! አሁን ያለን ተጫዋች: {len(PENDING_PLAYERS)}።\n"
+            f"📢 አዲስ ጨዋታ ለመጀመር ዝግጁ! አሁን ያለን ተጫዋች: **{len(PENDING_PLAYERS)}**።\n" # Displays total count
             f"ጨዋታው ወዲያውኑ ይጀምራል።\n\n"
             f"👥 ተቀላቅለዋል:\n{current_players_list}",
             parse_mode='Markdown'
@@ -1016,7 +1061,7 @@ async def cancel_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 
-# --- ADMIN HANDLERS (UNCHANGED) ---
+# --- ADMIN HANDLERS (NEW BROADCAST ADDED) ---
 
 async def check_admin(user_id: int) -> bool:
     """Simple check if the user is the admin."""
@@ -1119,6 +1164,34 @@ async def ap_bal_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as e:
         await update.message.reply_text(f"❌ ስህተት ተፈጠረ: {e}")
 
+async def ap_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: Sends a message to all users. Usage: /ap_broadcast [message]"""
+    if not await check_admin(update.effective_user.id):
+        await update.message.reply_text("❌ ይህ ትዕዛዝ ለአስተዳዳሪዎች ብቻ ነው።")
+        return
+
+    if not context.args:
+        await update.message.reply_text("❌ አጠቃቀም: /ap_broadcast [መልዕክት]")
+        return
+        
+    broadcast_message = " ".join(context.args)
+    user_ids = [uid for uid in USER_DB if isinstance(uid, int) and uid > 0 and uid != ADMIN_USER_ID]
+    
+    success_count = 0
+    fail_count = 0
+    
+    # Run broadcast in the background to prevent timeout
+    for user_id in user_ids:
+        try:
+            await context.bot.send_message(user_id, f"📣 **የአስተዳዳሪ መልዕክት:** {broadcast_message}", parse_mode='Markdown')
+            success_count += 1
+        except Exception:
+            fail_count += 1
+            
+    await update.message.reply_text(
+        f"✅ መልዕክቱ ለ {success_count} ተጠቃሚዎች ተልኳል።\n"
+        f"❌ {fail_count} ተጠቃሚዎች መልዕክቱን መቀበል አልቻሉም (ለምሳሌ ቦቱን አግደዋል)።"
+    )
 
 # --- CALLBACK QUERY HANDLER (for Mark/Bingo buttons) (UNCHANGED) ---
 
@@ -1200,7 +1273,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.answer("❌ ገና ቢንጎ አልሞሉም! በትክክል ይሙሉ።", show_alert=True)
             
             
-# --- 6. Main Function (UPDATED TO REFLECT NEW CONVERSATION FLOW) ---
+# --- 6. Main Function (UPDATED TO REFLECT NEW CONVERSATION FLOW AND ADMIN COMMANDS) ---
 
 def main():
     """Starts the bot. (Amharic: ቦቱን ይጀምራል)"""
@@ -1267,6 +1340,7 @@ def main():
     app.add_handler(CommandHandler("ap_dep", ap_dep)) 
     app.add_handler(CommandHandler("ap_bal", ap_bal)) 
     app.add_handler(CommandHandler("ap_bal_check", ap_bal_check)) 
+    app.add_handler(CommandHandler("ap_broadcast", ap_broadcast)) # NEW ADMIN COMMAND
 
     # --- 3. Callback Query Handler (for button interactions) ---
     app.add_handler(CallbackQueryHandler(handle_callback, pattern='^(MARK|BINGO)'))
