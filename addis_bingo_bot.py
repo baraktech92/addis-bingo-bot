@@ -22,16 +22,15 @@ from typing import Dict, Any, Optional
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE") 
 
 # !!! CRITICAL FIX: Admin User ID for forwarding deposits and access to admin commands !!!
-# !!! THIS VALUE IS NOW SET TO THE CONFIRMED NUMERIC ID: 5887428731 !!!
-ADMIN_USER_ID = 5887428731 # <--- የእርስዎ ትክክለኛ የቁጥር ID (Numeric ID)
+ADMIN_USER_ID = 5887428731 
 
 TELEBIRR_ACCOUNT = "0927922721" # Account for user deposits (Amharic: ለተጠቃሚዎች ገንዘብ ማስገቢያ አካውንት)
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", None)
 
 # Game & Financial Constants
 CARD_COST = 20.00  # Cost to play one game (in Birr)
-MIN_DEPOSIT = 50.00 # CRITICAL: Minimum deposit set to 50 Birr 
-MIN_WITHDRAW = 100.00 
+MIN_DEPOSIT = 50.00 
+MIN_WITHDRAW = 100.00 # CRITICAL: Minimum withdrawal set to 100 Birr
 REFERRAL_BONUS = 10.00
 MAX_PRESET_CARDS = 200 
 MIN_PLAYERS_TO_START = 1 
@@ -66,9 +65,8 @@ GET_TELEBIRR_ACCOUNT = 4
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# --- CRITICAL CHANGE 1: Data Versioning for Persistency ---
 PREVIOUS_STATE_KEY = "!!!PREVIOUS_STATE_SNAPSHOT!!!" 
-MIGRATION_VERSION = 5.1 # Version incremented for deposit flow refinement
+MIGRATION_VERSION = 5.2 # Version incremented for withdraw flow and countdown implementation
 
 # In-memory database simulation for user data 
 USER_DB: Dict[int, Dict[str, Any]] = {
@@ -81,7 +79,7 @@ LOBBY_STATE: Dict[str, Any] = {'is_running': False, 'msg_id': None, 'chat_id': N
 BINGO_CARD_SETS: Dict[int, Dict[str, Any]] = {} 
 
 
-# --- 2. Database (In-Memory Simulation) Functions (Unchanged) ---
+# --- 2. Database (In-Memory Simulation) Functions (Retained) ---
 
 def _ensure_balance_persistency():
     global USER_DB
@@ -205,7 +203,7 @@ def update_balance(user_id: int, amount: float, transaction_type: str, descripti
     logger.info(f"TX | User {user_id} | Type: {transaction_type} | Amount: {amount:.2f} | New Bal: {new_balance:.2f}")
     _save_current_state() 
 
-# --- 3. Game Loop and Flow Functions (Unchanged for brevity) ---
+# --- 3. Game Loop and Flow Functions ---
 
 async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: int, is_bot_win: bool):
     """Handles prize distribution, cleanup, and announcement."""
@@ -224,15 +222,17 @@ async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: 
     if not is_bot_win and winner_id > 0:
         update_balance(winner_id, prize_money, transaction_type='Game-Win', description=f"Game {game_id} Winner")
         
-    players_to_clean = [uid for uid in game['players'] if uid > 0] 
-    for uid in players_to_clean:
-        user_data = USER_DB.get(uid)
-        if user_data:
-            user_data['tx_history'] = [
-                tx for tx in user_data['tx_history'] 
-                if tx['type'] not in ['Game-Card Purchase', 'Game-Win']
-            ]
-            _save_current_state() 
+    # CRITICAL: Only clean history for Bot players (negative IDs)
+    for uid in game['players']:
+        if uid < 0:
+            user_data = USER_DB.get(uid)
+            if user_data:
+                # Remove Game-Card Purchase and Game-Win entries
+                user_data['tx_history'] = [
+                    tx for tx in user_data['tx_history'] 
+                    if tx['type'] not in ['Game-Card Purchase', 'Game-Win']
+                ]
+                _save_current_state() 
         
     announcement = (
         f"🎉🎉 ቢንጎ! ጨዋታው አብቅቷል! 🎉🎉\n\n"
@@ -263,6 +263,7 @@ async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: 
 
 async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
     """The main game loop that calls numbers and manages win conditions."""
+    # (Game loop logic remains largely the same)
     game = ACTIVE_GAMES.get(game_id)
     if not game: return
     
@@ -287,8 +288,9 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
             
             update_tasks = [] 
             
+            # Update all players' cards (real and bots)
             for uid, card in game['player_cards'].items():
-                if uid > 0: 
+                if uid > 0: # Only real players get card updates/keyboard edits
                     col_letter = get_col_letter(col_index)
                     
                     if called_num in card['set'][col_letter]:
@@ -317,6 +319,11 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
                                         parse_mode='Markdown'
                                     )
                                 )
+                            
+                            # Update bot data internally for win checks
+                            if uid < 0:
+                                card['marked'][pos] = True 
+                                
                         except ValueError:
                             continue
             
@@ -333,6 +340,7 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
             )
             
             try:
+                # Use main_chat_id for the group or the first real player's chat ID
                 await ctx.bot.edit_message_text(
                     chat_id=main_chat_id, 
                     message_id=game_message_id, 
@@ -344,12 +352,10 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
                 
             # PROMOTIONAL MODE ENFORCEMENT (Guaranteed Bot Win)
             if is_promotional_game and winning_bot_id and len(called_numbers) == BOT_WIN_CALL_THRESHOLD:
+                # For guaranteed win, assume the winning bot's card is completed
                 winning_card = game['player_cards'][winning_bot_id]
+                winning_card['marked'] = {(c, r): True for c in range(5) for r in range(5)}
                 
-                for c in range(5):
-                    for r in range(5):
-                        winning_card['marked'][(c, r)] = True
-                        
                 await finalize_win(ctx, game_id, winning_bot_id, True)
                 return 
             
@@ -366,6 +372,55 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
             ACTIVE_GAMES.pop(game_id, None)
 
 
+async def run_lobby_countdown(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs a 10-second countdown before starting the game."""
+    global LOBBY_STATE
+    
+    if not LOBBY_STATE['is_running'] or LOBBY_STATE['msg_id'] is None:
+        return 
+
+    main_chat_id = LOBBY_STATE['chat_id']
+    msg_id = LOBBY_STATE['msg_id']
+    
+    # Get total players before countdown
+    initial_real_players = len(PENDING_PLAYERS)
+    
+    for count in range(10, 0, -1):
+        if not LOBBY_STATE['is_running']: return # Check if cancelled
+        
+        # Calculate promotional count based on initial real players
+        if initial_real_players < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME:
+            # Add a stable number of bots for the display
+            display_bots = 30 
+            display_total = initial_real_players + display_bots
+        else:
+            display_total = initial_real_players
+
+        display_others_count = display_total - 1 
+
+        message = (
+            f"📢 አዲስ ጨዋታ ለመጀመር ዝግጁ! አሁን ያለን ተጫዋች: **እርስዎ እና ሌሎች {display_others_count} ተጫዋቾች ተቀላቅለዋል!**\n\n" 
+            f"⏳ **ጨዋታው በ {count} ሰከንዶች ውስጥ ይጀምራል...**\n"
+            f"**ተጨማሪ ተጫዋቾች እየተጠባበቅን ነው...**"
+        )
+        
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=main_chat_id, 
+                message_id=msg_id, 
+                text=message, 
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.warning(f"Error editing lobby countdown message: {e}")
+            
+        await asyncio.sleep(1)
+
+    # After countdown, ensure lobby is still running before starting
+    if LOBBY_STATE['is_running']:
+        await start_new_game(ctx)
+
+
 async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Initializes and starts a new Bingo game."""
     global PENDING_PLAYERS, LOBBY_STATE, BINGO_CARD_SETS
@@ -378,6 +433,19 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     main_chat_id = LOBBY_STATE['chat_id']
+    
+    # Send final "Game Started" update to the lobby message
+    if LOBBY_STATE['msg_id']:
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=main_chat_id, 
+                message_id=LOBBY_STATE['msg_id'], 
+                text="📢 ቆጠራው አብቅቷል! ጨዋታው አሁን ተጀምሯል። መልካም ዕድል!", 
+                parse_mode='Markdown'
+            )
+        except Exception:
+            pass # Ignore if message wasn't found or modified
+            
     LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None} 
 
     game_id = str(random.randint(100000, 999999))
@@ -406,7 +474,8 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     all_players = list(real_players) 
 
     if is_promotional_game:
-        num_bots = random.randint(20, 38)
+        # Bot count ensures total players is >= MIN_REAL_PLAYERS_FOR_ORGANIC_GAME (20) + up to 19 more
+        num_bots = random.randint(MIN_REAL_PLAYERS_FOR_ORGANIC_GAME - real_player_count, 38)
         bot_ids = [-(i + 1) for i in range(num_bots)]
         winning_bot_id = random.choice(bot_ids) 
         
@@ -423,6 +492,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             
             all_players.append(bot_id)
             
+            # Bot funding and card purchase simulation
             update_balance(bot_id, CARD_COST, 'Internal Bot Deposit', f"Game {game_id} Bot Funding")
             update_balance(bot_id, -CARD_COST, 'Game-Card Purchase', f"Card #{bot_card_num} for Game {game_id} Bot")
             
@@ -454,7 +524,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     
     for uid in real_players:
         
-        others_count = total_players - 1 
+        others_count = total_players - 1 # Use total players count for display
         
         game_msg_text = (
             f"🚨 **ቢንጎ ጨዋታ #{game_id} ተጀምሯል!** 🚨\n\n"
@@ -473,6 +543,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             logger.error(f"Failed to send start message to real player {uid}: {e}")
             
     if ACTIVE_GAMES[game_id]['message_id'] is None:
+        # Fallback to the main chat ID (e.g., if only one player is in the lobby)
         game_msg = await ctx.bot.send_message(main_chat_id, "🎲 የጨዋታ ማጠቃለያ መልእክት ለመላክ አልተቻለም፣ ጨዋታው ግን ተጀምሯል።")
         ACTIVE_GAMES[game_id]['message_id'] = game_msg.message_id
         
@@ -498,7 +569,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     asyncio.create_task(run_game_loop(ctx, game_id))
 
 
-# --- 4. Handler Functions (Start, Play, Cancel, Stats) (Unchanged) ---
+# --- 4. Handler Functions (Start, Play, Cancel, Stats) ---
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the process of asking the player to choose a Bingo card number."""
@@ -563,21 +634,37 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
         "⚠️ ጨዋታው በቅርቡ ይጀምራል። እባክዎ ይጠብቁ።"
     )
     
+    # --- COUNTDOWN TRIGGER LOGIC ---
     if not LOBBY_STATE['is_running'] and len(PENDING_PLAYERS) >= MIN_PLAYERS_TO_START:
         LOBBY_STATE['is_running'] = True
         LOBBY_STATE['chat_id'] = update.effective_chat.id
         
-        others_count = len(PENDING_PLAYERS) - 1
-        await update.message.reply_text(
-            f"📢 አዲስ ጨዋታ ለመጀመር ዝግጁ! አሁን ያለን ተጫዋች: **እርስዎ እና ሌሎች {others_count} ተጫዋቾች ተቀላቅለዋል!**\n" 
-            f"ጨዋታው ወዲያውኑ ይጀምራል።"
+        initial_real_players = len(PENDING_PLAYERS)
+        
+        # Calculate promotional count based on initial real players
+        if initial_real_players < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME:
+            display_bots = 30 # A stable, high number for promotional display
+            display_total = initial_real_players + display_bots
+        else:
+            display_total = initial_real_players
+
+        display_others_count = display_total - 1 
+        
+        # Send initial lobby message (will be edited by countdown)
+        lobby_msg = await update.message.reply_text(
+            f"📢 አዲስ ጨዋታ ለመጀመር ዝግጁ! አሁን ያለን ተጫዋች: **እርስዎ እና ሌሎች {display_others_count} ተጫዋቾች ተቀላቅለዋል!**\n\n" 
+            f"⏳ **ጨዋታው በ 10 ሰከንዶች ውስጥ ይጀምራል...**\n"
+            f"**ተጨማሪ ተጫዋቾች እየተጠባበቅን ነው...**"
         )
-        await start_new_game(context)
+        LOBBY_STATE['msg_id'] = lobby_msg.message_id
+        
+        # Start the countdown task
+        asyncio.create_task(run_lobby_countdown(context))
 
     return ConversationHandler.END
 
 
-# --- DEPOSIT FLOW HANDLERS (REFINED) ---
+# --- DEPOSIT FLOW HANDLERS (FIXED/RETAINED) ---
 
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the deposit conversation, providing Telebirr details and user ID."""
@@ -633,6 +720,7 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if update.message.photo or update.message.document:
         
+        # Log pending transaction
         update_balance(user.id, 0, 'Deposit Pending', f"Deposit of {deposit_amount:.2f} Birr pending admin approval")
         
         admin_message = (
@@ -644,6 +732,7 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         
         try:
+            # Send message to admin user ID
             if update.message.photo:
                 await context.bot.send_photo(
                     chat_id=ADMIN_USER_ID,
@@ -668,7 +757,6 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.user_data.pop('deposit_amount', None)
             
         except Exception as e:
-            # This is the point where the error happened if ADMIN_USER_ID was an @username
             logger.error(f"Error forwarding receipt to admin {ADMIN_USER_ID}: {e}")
             await update.message.reply_text(f"❌ ስህተት ተፈጥሯል። ማረጋገጫውን (receipt) ለአስተዳዳሪው መላክ አልተቻለም። ስህተቱ፡ {e}")
             return WAITING_FOR_RECEIPT
@@ -678,7 +766,109 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         await update.message.reply_text("❌ እባክዎ የክፍያ ማረጋገጫውን በ **ፎቶ ወይም በ Document** መልክ ብቻ ይላኩልኝ።")
         return WAITING_FOR_RECEIPT
+
+
+# --- WITHDRAWAL FLOW HANDLERS (NEWLY IMPLEMENTED) ---
+
+async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the withdrawal conversation."""
+    user_id = update.effective_user.id
+    user_data = await get_user_data(user_id)
+    balance = user_data['balance']
+    
+    if balance < MIN_WITHDRAW:
+        await update.message.reply_text(
+            f"❌ ለማውጣት በቂ ሒሳብ የለዎትም። አሁን ያለዎት: {balance:.2f} ብር ነው።\n"
+            f"ዝቅተኛው ማውጣት: {MIN_WITHDRAW:.2f} ብር ነው።"
+        )
+        return ConversationHandler.END
+
+    context.user_data['balance'] = balance
+    
+    await update.message.reply_text(
+        f"💸 **ገንዘብ ለማውጣት** 💸\n\n"
+        f"1. እባክዎ ማውጣት የሚፈልጉትን ጠቅላላ **የብር መጠን** በቁጥር ያስገቡ።\n"
+        f"   (ዝቅተኛው ማውጣት: {MIN_WITHDRAW:.2f} ብር)\n"
+        f"ለመሰረዝ /cancel ይጠቀሙ።"
+    )
+
+    return GET_WITHDRAW_AMOUNT
+
+async def get_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Validates the withdrawal amount."""
+    user_id = update.effective_user.id
+    current_balance = context.user_data.get('balance', 0.0)
+    
+    try:
+        amount = float(update.message.text.strip())
         
+        if amount < MIN_WITHDRAW:
+            await update.message.reply_text(f"❌ ዝቅተኛው ማውጣት {MIN_WITHDRAW:.2f} ብር ነው። እባክዎ ትክክለኛውን መጠን ያስገቡ።")
+            return GET_WITHDRAW_AMOUNT
+            
+        if amount > current_balance:
+            await update.message.reply_text(f"❌ በሒሳብዎ ላይ {current_balance:.2f} ብር ብቻ ነው ያለው። እባክዎ ከዚህ የማያልፍ መጠን ያስገቡ።")
+            return GET_WITHDRAW_AMOUNT
+            
+        context.user_data['withdraw_amount'] = amount
+        
+        await update.message.reply_text(
+            f"✅ **{amount:.2f} ብር** ለማውጣት ጠይቀዋል።\n\n"
+            "2. እባክዎ ገንዘቡ እንዲላክሎት የሚፈልጉትን **የቴሌብር ስልክ ቁጥር** ያስገቡ።\n"
+        )
+        return GET_TELEBIRR_ACCOUNT
+        
+    except ValueError:
+        await update.message.reply_text("❌ እባክዎ ትክክለኛ የብር መጠን በቁጥር ያስገቡ።")
+        return GET_WITHDRAW_AMOUNT
+
+async def get_telebirr_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives and logs the Telebirr account to the admin."""
+    user = update.effective_user
+    telebirr_account = update.message.text.strip()
+    withdraw_amount = context.user_data.get('withdraw_amount')
+
+    # Basic check for phone number format (can be improved)
+    if not telebirr_account.isdigit() or len(telebirr_account) < 9:
+        await update.message.reply_text("❌ ትክክለኛ ስልክ ቁጥር አይመስልም። እባክዎ የቴሌብር ቁጥርዎን እንደገና ያስገቡ።")
+        return GET_TELEBIRR_ACCOUNT
+
+    # Deduct balance immediately and log as pending
+    update_balance(user.id, -withdraw_amount, 'Withdrawal Pending', f"Withdrawal request of {withdraw_amount:.2f} Birr to {telebirr_account}")
+    
+    admin_message = (
+        f"💸 **አዲስ የማውጣት ጥያቄ** 💸\n"
+        f"👤 ከ: {user.full_name} (ID: `{user.id}`)\n"
+        f"💰 መጠን: **{withdraw_amount:.2f} ብር**\n"
+        f"📞 የቴሌብር ቁጥር: **`{telebirr_account}`**\n"
+        f"✍️ ሁኔታ: ለመላክ በመጠባበቅ ላይ\n\n"
+        f"ትዕዛዝ: ገንዘቡን ከላኩ በኋላ: `/ap_w_confirm {user.id} {withdraw_amount:.2f}`"
+    )
+    
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_USER_ID,
+            text=admin_message,
+            parse_mode='Markdown'
+        )
+        
+        await update.message.reply_text(
+            "✅ የማውጣት ጥያቄዎ በተሳካ ሁኔታ ተመዝግቧል።\n"
+            f"💸 **{withdraw_amount:.2f} ብር** በቅርቡ ወደ **{telebirr_account}** ይላክልዎታል።\n"
+            "እባክዎ ገንዘቡ እስኪላክ በትዕግስት ይጠብቁ።"
+        )
+        
+        context.user_data.clear()
+        
+    except Exception as e:
+        logger.error(f"Error forwarding withdrawal request to admin {ADMIN_USER_ID}: {e}")
+        await update.message.reply_text(f"❌ ስህተት ተፈጠረ። የማውጣት ጥያቄውን መላክ አልተቻለም። ስህተቱ፡ {e}")
+        # Reverse the balance deduction if forwarding fails (CRITICAL)
+        update_balance(user.id, withdraw_amount, 'Withdrawal Reversal', f"Failed withdrawal forwarding, reversed {withdraw_amount:.2f} Birr")
+        return GET_TELEBIRR_ACCOUNT # Retry state
+
+    return ConversationHandler.END
+
 # --- Placeholder functions for other commands (omitted for brevity) ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -699,6 +889,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"ሰላም {user.mention_html()}! እንኳን ወደ አዲስ ቢንጎ በደህና መጡ።\n\n"
         "ለመጀመር የሚከተሉትን ትዕዛዞች ይጠቀሙ:\n"
         f"💰 /deposit - ገንዘብ ለማስገባት (ዝቅተኛው: {MIN_DEPOSIT:.2f} ብር)\n"
+        f"💸 /withdraw - ገንዘብ ለማውጣት (ዝቅተኛው: {MIN_WITHDRAW:.2f} ብር)\n"
         f"🎲 /play - የቢንጎ ካርድ ገዝተው ጨዋታ ለመቀላቀል (ዋጋ: {CARD_COST:.2f} ብር)\n"
         "💳 /balance - ሒሳብዎን ለማየት\n"
         "📜 /history - የግብይት ታሪክዎን ለማየት\n\n"
@@ -709,6 +900,18 @@ async def quickplay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await play_command(update, context)
 
 async def cancel_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if LOBBY_STATE.get('is_running'):
+        LOBBY_STATE['is_running'] = False # Stop the countdown
+    
+    # Check if user was in a pending game and remove card purchase effect
+    user_id = update.effective_user.id
+    if user_id in PENDING_PLAYERS:
+        del PENDING_PLAYERS[user_id]
+        # Simulate refund (assuming the card purchase was the last negative transaction)
+        card_cost_refund = CARD_COST # Assume refund is equal to card cost
+        update_balance(user_id, card_cost_refund, 'Game-Card Refund', "Card purchase cancelled")
+        await update.message.reply_text(f"የካርድ ግዢዎ ተሰርዟል። {card_cost_refund:.2f} ብር ተመላሽ ተደርጓል።")
+        
     context.user_data.clear() 
     await update.message.reply_text("የአሁኑ ሂደት ተሰርዟል።")
     return ConversationHandler.END
@@ -720,19 +923,20 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(
         f"💳 የአሁኑ ሒሳብዎ: **{user_data['balance']:.2f} ብር**\n\n"
         f"ገንዘብ ለማስገባት: /deposit\n"
-        f"ገንዘብ ለማውጣት: /withdraw (በቅርቡ ይጀምራል)",
+        f"ገንዘብ ለማውጣት: /withdraw (ዝቅተኛው: {MIN_WITHDRAW:.2f} ብር)",
         parse_mode='Markdown'
     )
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_data = await get_user_data(user_id)
+    # Filter for non-game related transactions (as requested by user)
     history = [tx for tx in user_data['tx_history'] if tx['type'] not in ['Game-Card Purchase', 'Game-Win']]
     
     last_5_history = history[-5:] 
     
     if not last_5_history:
-        msg = "የግብይት ታሪክ የለዎትም። (የጨዋታ ግብይቶች አይታዩም።)"
+        msg = "📜 የግብይት ታሪክ የለዎትም። (የጨዋታ ግብይቶች አይታዩም።)"
     else:
         msg = "📜 **የመጨረሻ 5 የገንዘብ ግብይቶች** 📜\n(የካርድ ግዢና የሽልማት ግብይቶች አይታዩም)\n"
         for tx in reversed(last_5_history):
@@ -740,14 +944,14 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             sign = "+" if tx['amount'] >= 0 else ""
             
             status = ""
-            if tx['type'] == 'Deposit Pending':
+            if 'Pending' in tx['type']:
                 status = " (በመጠባበቅ ላይ)"
-                
+            
             msg += f"\n- {date_str}: {tx['description']}{status} | {sign}{tx['amount']:.2f} ብር"
             
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# --- ADMIN HANDLERS (omitted for brevity) ---
+# --- ADMIN HANDLERS ---
 async def check_admin(user_id: int) -> bool:
     return user_id == ADMIN_USER_ID
 
@@ -766,7 +970,7 @@ async def ap_dep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         target_user_id = int(parts[0])
         amount = float(parts[1])
         
-        update_balance(target_user_id, amount, 'Admin Deposit', f"Admin added {amount:.2f} Birr")
+        update_balance(target_user_id, amount, 'Admin Deposit Confirmed', f"Admin added {amount:.2f} Birr")
         
         await update.message.reply_text(f"✅ ለተጠቃሚ ID {target_user_id} ሒሳብ {amount:.2f} ብር ገቢ ተደርጓል።")
         try:
@@ -778,6 +982,43 @@ async def ap_dep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except Exception:
              logger.warning(f"Could not notify user {target_user_id} about admin deposit.")
+
+    except ValueError:
+        await update.message.reply_text("❌ የተጠቃሚ ID እና መጠን ቁጥር መሆን አለባቸው።")
+    except Exception as e:
+        await update.message.reply_text(f"❌ ስህተት ተፈጠረ: {e}")
+
+async def ap_w_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: Confirms a withdrawal has been processed. Usage: /ap_w_confirm [user_id] [amount]"""
+    if not await check_admin(update.effective_user.id):
+        await update.message.reply_text("❌ ይህ ትዕዛዝ ለአስተዳዳሪዎች ብቻ ነው።")
+        return
+
+    try:
+        parts = context.args
+        if len(parts) != 2:
+            await update.message.reply_text("❌ አጠቃቀም: /ap_w_confirm [user_id] [amount]")
+            return
+            
+        target_user_id = int(parts[0])
+        amount = float(parts[1])
+        
+        # Change status from Pending to Confirmed (The balance deduction happened in the withdrawal flow)
+        if target_user_id in USER_DB:
+            # Find and update the latest pending withdrawal to 'Confirmed' (optional step for better logging)
+            pass
+        
+        await update.message.reply_text(f"✅ የተጠቃሚ ID {target_user_id} የ {amount:.2f} ብር የማውጣት ጥያቄ ተረጋገጠ።")
+        
+        try:
+            target_user_data = await get_user_data(target_user_id) 
+            await context.bot.send_message(
+                target_user_id, 
+                f"✅ **{amount:.2f} ብር** የማውጣት ጥያቄዎ ተረጋግጦ ገንዘቡ ተልኮልዎታል። የአሁኑ ሒሳብዎ: **{target_user_data['balance']:.2f} ብር**", 
+                parse_mode='Markdown'
+            )
+        except Exception:
+             logger.warning(f"Could not notify user {target_user_id} about withdrawal confirmation.")
 
     except ValueError:
         await update.message.reply_text("❌ የተጠቃሚ ID እና መጠን ቁጥር መሆን አለባቸው።")
@@ -835,8 +1076,8 @@ async def ap_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"✅ መልዕክቱ ለ {success_count} ተጠቃሚዎች ተልኳል።\n"
         f"❌ {fail_count} ተጠቃሚዎች መልዕክቱን መቀበል አልቻሉም (ለምሳሌ ቦቱን አግደዋል)።"
     )
-
-# --- UTILITIES (omitted for brevity) ---
+    
+# --- UTILITIES (RETAINED) ---
 def get_col_letter(col_index: int) -> str:
     return ['B', 'I', 'N', 'G', 'O'][col_index]
 
@@ -984,11 +1225,8 @@ def main():
     """Starts the bot."""
     global app
     
-    # --- CRITICAL STARTUP CHECK ---
     if not TOKEN or TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
         logger.error("FATAL: TELEGRAM_TOKEN is missing or using default placeholder. Bot cannot connect to Telegram API.")
-        # If the token is missing, the Application builder will fail or the bot won't work.
-        # We must exit here.
         return 
     
     logger.info("TOKEN check passed. Attempting to start the bot...")
@@ -998,6 +1236,7 @@ def main():
     
     # --- 1. Conversation Handlers ---
     
+    # Deposit Conversation Handler
     deposit_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("deposit", deposit_command)],
         states={
@@ -1010,6 +1249,20 @@ def main():
     )
     app.add_handler(deposit_conv_handler)
     
+    # Withdrawal Conversation Handler (NEW)
+    withdraw_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("withdraw", withdraw_command)],
+        states={
+            GET_WITHDRAW_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_withdraw_amount)],
+            GET_TELEBIRR_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_telebirr_account)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_play)],
+        per_user=True,
+        per_chat=False,
+    )
+    app.add_handler(withdraw_conv_handler)
+    
+    # Play Conversation Handler
     play_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("play", play_command)],
         states={
@@ -1028,6 +1281,7 @@ def main():
     
     # Admin commands 
     app.add_handler(CommandHandler("ap_dep", ap_dep)) 
+    app.add_handler(CommandHandler("ap_w_confirm", ap_w_confirm)) # New admin command for withdrawal confirmation
     app.add_handler(CommandHandler("ap_bal_check", ap_bal_check)) 
     app.add_handler(CommandHandler("ap_broadcast", ap_broadcast)) 
 
