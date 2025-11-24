@@ -32,7 +32,10 @@ MIN_WITHDRAW = 50.00
 REFERRAL_BONUS = 10.00
 MAX_PRESET_CARDS = 200 # Total number of unique card patterns available
 MIN_PLAYERS_TO_START = 1 # Minimum players needed to start the lobby countdown
-MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 5 # If <= 4 real players, a bot is guaranteed to win (Stealth Mode)
+
+# CRITICAL CHANGE: If < 20 real players, promotional bots join and are guaranteed to win.
+MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 20 
+
 PRIZE_POOL_PERCENTAGE = 0.85 # 85% of total pot goes to winner (15% house cut)
 BOT_WIN_CALL_THRESHOLD = 30 # NEW: Bot is guaranteed to win after this many calls if in stealth mode
 
@@ -62,13 +65,17 @@ def update_user_data(user_id: int, data: Dict[str, Any]):
 
 async def get_user_data(user_id: int) -> Dict[str, Any]:
     """Retrieves user data, creating a default entry if none exists. (Amharic: የተጠቃሚ መረጃን ያመጣል)"""
+    # CRITICAL CHANGE for Stealth Mode: Bots should appear as generic players
+    if user_id < 0:
+        # Bot name should be generic and not reveal identity
+        # We use a static name based on the negative ID for consistency
+        bot_name_index = abs(user_id)
+        # Using a neutral name like 'Player X' to hide the bot identity
+        return {'balance': 0.00, 'referred_by': None, 'first_name': f"Player {bot_name_index}", 'tx_history': []}
+        
     if user_id not in USER_DB:
         # Simulate initial registration
         USER_DB[user_id] = {'balance': 0.00, 'referred_by': None, 'first_name': f"User {user_id}", 'tx_history': []}
-    
-    # Handle Bot names for display
-    if user_id < 0:
-        return {'balance': 0.00, 'referred_by': None, 'first_name': f"Bot {abs(user_id)}", 'tx_history': []}
         
     return USER_DB[user_id].copy()
 
@@ -146,7 +153,6 @@ def build_card_keyboard(card: Dict[str, Any], game_id: str, message_id: int, las
     """
     Builds the 5x5 Bingo card keyboard for marking. 
     (Amharic: የቢንጎ ካርድ ቁልፍ ሰሌዳን ይገነባል)
-    IMPROVEMENT: Uses last_call to ensure the latest called number is shown as green immediately.
     """
     kb = []
     
@@ -228,18 +234,21 @@ async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: 
     
     # 2. Get winner name (for display)
     winner_name = (await get_user_data(winner_id)).get('first_name', f"User {winner_id}")
-    if is_bot_win:
-        winner_name = f"ኮምፒዩተር ቦት ({winner_name})" # Amharic: Computer Bot
+    
+    # CRITICAL CHANGE for Stealth Mode: REMOVED explicit bot announcement
+    # if is_bot_win:
+    #     winner_name = f"ኮምፒዩተር ተጫዋች ({winner_name})" # Amharic: Computer Player
+    # Now, if it's a bot, the name will be "Player X" from get_user_data.
         
     # 1. Distribute Winnings (Atomic update) - Only for real players
     if not is_bot_win:
         update_balance(winner_id, prize_money, transaction_type='Bingo Win', description=f"Game {game_id} Winner")
-    # If bot wins, the money is burned (house win)
+    # If bot wins, the money is burned (house win), keeping the logic.
         
     # 3. Announcement Message
     announcement = (
         f"🎉🎉 ቢንጎ! ጨዋታው አብቅቷል! 🎉🎉\n\n"
-        f"🏆 አሸናፊ: {winner_name}\n"
+        f"🏆 አሸናፊ: {winner_name}\n" # This now just shows the stealth name ("Player X") if it's a bot
         f"💰 ጠቅላላ የገንዘብ ሽልማት: {prize_money:.2f} ብር\n\n"
         f"አዲስ ጨዋታ ለመጀመር: /play ወይም /quickplay"
     )
@@ -268,7 +277,6 @@ async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: 
 async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
     """
     The main game loop that calls numbers and manages win conditions. 
-    IMPROVEMENT: Edits player cards immediately when a number is called for fast green dot update.
     (Amharic: ዋናው የጨዋታ ዑደት)
     """
     game = ACTIVE_GAMES.get(game_id)
@@ -280,9 +288,9 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
     
     called_numbers = []
     
-    # Stealth Mode Setup (Amharic: ስውር የጨዋታ ሁናቴ ዝግጅት)
-    is_stealth_game = game.get('is_stealth_game', False)
-    winning_bot_id = game.get('winning_bot_id') # Will be set if stealth mode is active
+    # Promotional Mode Setup (Amharic: ማስተዋወቂያ የጨዋታ ሁናቴ ዝግጅት)
+    is_promotional_game = game.get('is_promotional_game', False)
+    winning_bot_id = game.get('winning_bot_id') # Will be set if promotional mode is active
 
     main_chat_id = game['chat_id']
     game_message_id = game['message_id']
@@ -318,7 +326,6 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
                             kb = build_card_keyboard(card, game_id, card['win_message_id'], called_num)
                             
                             # UPDATED TEXT: Include the latest called number prominently
-                            # The user requested this number to be on the winning instruction.
                             card_msg_text = (
                                 f"**ካርድ ቁጥር #{card['number']}**\n"
                                 f"🔥 **አሁን የተጠራው ቁጥር: {get_bingo_call(called_num)}** 🔥\n\n" 
@@ -343,6 +350,10 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
 
             # 3. Update the main game message
             last_5_calls = [get_bingo_call(n) for n in called_numbers[-5:]]
+            
+            # Save called numbers in game state to allow card update handler to access it
+            game['called_numbers'] = called_numbers 
+            
             msg_text = (
                 f"🎲 የቢንጎ ጨዋታ በሂደት ላይ... (ካርድ {len(called_numbers)}/75)\n\n"
                 f"📣 የተጠራው ቁጥር: **{get_bingo_call(called_num)}**\n\n"
@@ -359,8 +370,8 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
             except Exception as e:
                 logger.warning(f"Failed to edit game message: {e}")
                 
-            # 4. STEALTH MODE ENFORCEMENT (Guaranteed Bot Win Logic) - IMPROVED
-            if is_stealth_game and winning_bot_id and len(called_numbers) == BOT_WIN_CALL_THRESHOLD:
+            # 4. PROMOTIONAL MODE ENFORCEMENT (Guaranteed Bot Win Logic) - UNCHANGED
+            if is_promotional_game and winning_bot_id and len(called_numbers) == BOT_WIN_CALL_THRESHOLD:
                 # GUARANTEE THE BOT WIN
                 winning_card = game['player_cards'][winning_bot_id]
                 
@@ -422,14 +433,16 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         player_cards[user_id]['marked'][(2, 2)] = True
 
 
-    # 2. Stealth Mode Setup (Check player count) - IMPROVED BOT INCLUSION
+    # 2. Promotional Mode Setup (Check player count)
     real_player_count = len(players)
     winning_bot_id: Optional[int] = None
-    is_stealth_game = real_player_count < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME
+    # If real_player_count is 19 or less (< 20), promotional mode is active.
+    is_promotional_game = real_player_count < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME
 
-    if is_stealth_game:
+    if is_promotional_game:
         # User requested 10-20 computer players
         num_bots = random.randint(10, 20)
+        # Use negative IDs for bots
         bot_ids = [-(i + 1) for i in range(num_bots)]
         
         # Select one bot to be the guaranteed winner (always wins)
@@ -457,7 +470,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 'win_message_id': None # Bots don't need a message ID
             }
         
-        logger.info(f"STEALTH MODE: Game {game_id} started with {len(players)} total players ({real_player_count} real + {num_bots} bots). Bot {winning_bot_id} is guaranteed to win.")
+        logger.info(f"PROMOTIONAL MODE (Stealth): Game {game_id} started with {len(players)} total players ({real_player_count} real + {num_bots} bots). Bot {winning_bot_id} is guaranteed to win.")
         
     # 3. Create the game object and add to active list
     ACTIVE_GAMES[game_id] = {
@@ -465,7 +478,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         'chat_id': main_chat_id, 
         'players': players, # Includes bots
         'player_cards': player_cards, # Includes bots' cards
-        'is_stealth_game': is_stealth_game, # NEW
+        'is_promotional_game': is_promotional_game, # NEW
         'winning_bot_id': winning_bot_id, # NEW
         'message_id': None, 
         'start_time': time.time()
@@ -473,12 +486,23 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     
     # 4. Send initial announcement message
     
-    # Filter for real player names for display list
-    real_player_names = [(uid, await get_user_data(uid)) for uid in players if uid > 0]
-    player_list = "\n".join([f"- {(p.get('first_name', 'Unnamed'))} (ID: {uid})" for uid, p in real_player_names])
-    if is_stealth_game:
-        player_list += f"\n\n... እና {len(players) - real_player_count} ሌሎች ተጫዋቾች"
-
+    # CRITICAL CHANGE for Stealth Mode: Build a list of all player names (real and bot), hiding bot IDs.
+    display_names = []
+    for uid in players:
+        user_data = await get_user_data(uid)
+        name = user_data.get('first_name', 'Unnamed Player')
+        
+        if uid > 0:
+            # Show ID for real players for transparency
+            display_names.append(f"- {name} (ID: {uid})")
+        else:
+            # For bots, just use the stealth name (e.g., 'Player X') without the negative ID
+            display_names.append(f"- {name}") 
+            
+    player_list = "\n".join(display_names)
+    
+    # CRITICAL CHANGE for Stealth Mode: REMOVED explicit promotional mode announcement.
+    
     total_pot = len(players) * CARD_COST # Calculate pot based on total players (real + bots)
     
     game_msg_text = (
@@ -501,7 +525,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 f"**ካርድ ቁጥር #{card['number']}**\n"
                 f"🔥 **ጨዋታው በቅርቡ ይጀምራል!** 🔥\n\n" # Placeholder for the latest call
                 f"🟢 ቁጥር ሲጠራ 'Mark' ቁልፉን ይጫኑ።\n"
-                f"✅ 5 አግድም፣ ቁመታዊ ወይም ሰያፍ መስመር ሲሞላ '🚨 BINGO 🚨' ይጫኑ።"
+                f"✅ 5 አግድም፣ ቁመታዊ ወይም ሰያፍ መስመር ሲሞላ '🚨 BINGO 🚨' የሚለውን ይጫኑ።"
             )
             
             card_message = await ctx.bot.send_message(uid, card_message_text, reply_markup=kb, parse_mode='Markdown')
@@ -600,7 +624,9 @@ async def cancel_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the user's current balance. (Amharic: የአሁኑን ሂሳብ ያሳያል)"""
+    """Displays the user's current balance. (Amharic: የአሁኑን ሂሳብ ያሳያል)
+    NOTE: This uses the correct get_user_data which reads the updated balance 
+    after admin approval via ap_dep, ensuring the balance is current."""
     user_id = update.effective_user.id
     user_data = await get_user_data(user_id)
     
@@ -891,7 +917,8 @@ async def ap_dep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Notify both admin and user
         await update.message.reply_text(f"✅ ለተጠቃሚ ID {target_user_id} ሒሳብ {amount:.2f} ብር ገቢ ተደርጓል።")
         try:
-            target_user_data = await get_user_data(target_user_id)
+            # Fetch updated data to show real balance
+            target_user_data = await get_user_data(target_user_id) 
             await context.bot.send_message(
                 target_user_id, 
                 f"🎉 **{amount:.2f} ብር** ወደ ሒሳብዎ ገቢ ተደርጓል። የአሁኑ ሒሳብዎ: **{target_user_data['balance']:.2f} ብር**", 
@@ -1045,7 +1072,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Temporary message until finalize_win updates it
             await query.edit_message_text("🎉 ቢንጎ! ማሸነፍዎ እየተረጋገጠ ነው። እባክዎ ይጠብቁ።")
         else:
-            await query.answer("❌ ገና ቢንጎ አልሞሉ! በትክክል ይሙሉ።", show_alert=True)
+            await query.answer("❌ ገና ቢንጎ አልሞሉም! በትክክል ይሙሉ።", show_alert=True)
             
             
 # --- 6. Main Function ---
