@@ -39,6 +39,15 @@ MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 20
 PRIZE_POOL_PERCENTAGE = 0.85 # 85% of total pot goes to winner (15% house cut)
 BOT_WIN_CALL_THRESHOLD = 30 # NEW: Bot is guaranteed to win after this many calls if in stealth mode
 
+# NEW: Ethiopian names for bot stealth mode (Amharic: ለቦት ስውር ሁናቴ የኢትዮጵያ ስሞች)
+ETHIOPIAN_BOT_NAMES = [
+    "Abrham", "Aster", "Dawit", "Eleni", "Firaol", "Genet", "Hagos", "Hana",
+    "Kaleb", "Liyu", "Mekdes", "Nathan", "Rahel", "Samuel", "Selam", "Tigist",
+    "Yared", "Zewdu", "Abel", "Saba", "Tewodros", "Yeshi", "Beza", "Gelila",
+    "Tsega", "Nardos", "Ermias", "Moges", "Tadesse", "Hiwot", "Kidus", "Abeba",
+    "Mame", "Lidya", "Aklilu", "Surafel", "Nebiyou", "Fasika", "Melat", "Amanuel"
+]
+
 # Conversation States
 GET_CARD_NUMBER, GET_DEPOSIT_CONFIRMATION = range(2)
 GET_WITHDRAW_AMOUNT, GET_TELEBIRR_ACCOUNT = range(2, 4)
@@ -68,10 +77,14 @@ async def get_user_data(user_id: int) -> Dict[str, Any]:
     # CRITICAL CHANGE for Stealth Mode: Bots should appear as generic players
     if user_id < 0:
         # Bot name should be generic and not reveal identity
-        # We use a static name based on the negative ID for consistency
         bot_name_index = abs(user_id)
-        # Using a neutral name like 'Player X' to hide the bot identity
-        return {'balance': 0.00, 'referred_by': None, 'first_name': f"Player {bot_name_index}", 'tx_history': []}
+        
+        # New: Use Ethiopian names for stealth, cycling through the list
+        name_index = (bot_name_index - 1) % len(ETHIOPIAN_BOT_NAMES)
+        bot_name = ETHIOPIAN_BOT_NAMES[name_index]
+        
+        # Give the bot a consistent name based on its ID
+        return {'balance': 0.00, 'referred_by': None, 'first_name': bot_name, 'tx_history': []}
         
     if user_id not in USER_DB:
         # Simulate initial registration
@@ -233,13 +246,9 @@ async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: 
     prize_money = total_pot * PRIZE_POOL_PERCENTAGE
     
     # 2. Get winner name (for display)
+    # The winner_name will be the stealth Ethiopian name if it's a bot (user_id < 0)
     winner_name = (await get_user_data(winner_id)).get('first_name', f"User {winner_id}")
     
-    # CRITICAL CHANGE for Stealth Mode: REMOVED explicit bot announcement
-    # if is_bot_win:
-    #     winner_name = f"ኮምፒዩተር ተጫዋች ({winner_name})" # Amharic: Computer Player
-    # Now, if it's a bot, the name will be "Player X" from get_user_data.
-        
     # 1. Distribute Winnings (Atomic update) - Only for real players
     if not is_bot_win:
         update_balance(winner_id, prize_money, transaction_type='Bingo Win', description=f"Game {game_id} Winner")
@@ -248,7 +257,7 @@ async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: 
     # 3. Announcement Message
     announcement = (
         f"🎉🎉 ቢንጎ! ጨዋታው አብቅቷል! 🎉🎉\n\n"
-        f"🏆 አሸናፊ: {winner_name}\n" # This now just shows the stealth name ("Player X") if it's a bot
+        f"🏆 አሸናፊ: {winner_name}\n" # This now just shows the stealth name (e.g., "Abrham") if it's a bot
         f"💰 ጠቅላላ የገንዘብ ሽልማት: {prize_money:.2f} ብር\n\n"
         f"አዲስ ጨዋታ ለመጀመር: /play ወይም /quickplay"
     )
@@ -440,9 +449,11 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     is_promotional_game = real_player_count < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME
 
     if is_promotional_game:
-        # User requested 10-20 computer players
-        num_bots = random.randint(10, 20)
+        # CRITICAL CHANGE: Bot Quantity Update: 20-38 bots when real players < 20
+        num_bots = random.randint(20, 38)
+        
         # Use negative IDs for bots
+        # The list comprehension starts at 0, so the IDs will be -1, -2, -3...
         bot_ids = [-(i + 1) for i in range(num_bots)]
         
         # Select one bot to be the guaranteed winner (always wins)
@@ -493,10 +504,10 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         name = user_data.get('first_name', 'Unnamed Player')
         
         if uid > 0:
-            # Show ID for real players for transparency
+            # Show ID for real players for transparency (only real players see their own ID, others see only the name)
             display_names.append(f"- {name} (ID: {uid})")
         else:
-            # For bots, just use the stealth name (e.g., 'Player X') without the negative ID
+            # For bots, just use the stealth Ethiopian name without the negative ID
             display_names.append(f"- {name}") 
             
     player_list = "\n".join(display_names)
@@ -665,7 +676,7 @@ async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays general bot statistics. (Amharic: አጠቃላይ የቦት ስታስቲክስ ያሳያል)"""
     total_users = len(USER_DB)
-    total_balance = sum(u['balance'] for u in USER_DB.values())
+    total_balance = sum(u['balance'] for u in USER_DB.values() if u['balance'] > 0) # Only count real user balances
     active_games = len(ACTIVE_GAMES)
     pending_players = len(PENDING_PLAYERS)
     
