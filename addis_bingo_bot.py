@@ -18,7 +18,6 @@ from typing import Dict, Any, Optional
 # --- 1. Configuration and Constants ---
 
 # Retrieve Telegram Bot Token from environment variable
-# CRITICAL: Ensure the TELEGRAM_TOKEN is set for deployment.
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE") 
 
 # CRITICAL FIX: Admin User ID for forwarding deposits and access to admin commands
@@ -39,7 +38,8 @@ MAX_PRESET_CARDS = 200
 MIN_PLAYERS_TO_START = 1 
 MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 20 
 BOT_WIN_CALL_THRESHOLD = 30 
-CALL_INTERVAL = 2.00004 
+# USER REQUESTED FIX: Changed from 2.00004 to 2.30 seconds
+CALL_INTERVAL = 2.30 
 
 # Ethiopian names for bot stealth mode 
 ETHIOPIAN_MALE_NAMES = [
@@ -276,6 +276,7 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
             if uid > 0: # Only real players get card updates/keyboard edits
                 col_letter = get_col_letter(col_index)
                 
+                # Check if the called number is on the card
                 if called_num in card['set'][col_letter]:
                     try:
                         # Find the position of the called number on the card
@@ -286,7 +287,7 @@ async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
                         
                         # If the player has a card message, prepare the edit task
                         if card['win_message_id']: 
-                            # The keyboard now uses the latest called_num for display
+                            # FIX: Ensure called_num is passed to build_card_keyboard for display sync
                             kb = build_card_keyboard(card, game_id, card['win_message_id'], called_num)
                             
                             card_msg_text = (
@@ -533,6 +534,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         card_message = await ctx.bot.send_message(uid, card_message_text, reply_markup=kb, parse_mode='Markdown')
         card['win_message_id'] = card_message.message_id
         
+        # Second update to include message_id in callback data
         kb_final = build_card_keyboard(card, game_id, card_message.message_id)
         await ctx.bot.edit_message_reply_markup(chat_id=uid, message_id=card_message.message_id, reply_markup=kb_final)
 
@@ -625,8 +627,8 @@ async def choose_card(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             LOBBY_STATE['chat_id'] = update.effective_chat.id
             LOBBY_STATE['is_running'] = True
             
-            # Generate a new promotional count between 20 and 39
-            promotional_total = random.randint(20, 39)
+            # Generate a new promotional count between 20 and 39 (USER REQUESTED)
+            promotional_total = random.randint(20, 39) 
             LOBBY_STATE['display_total'] = promotional_total
             
             lobby_msg = await update.message.reply_text(
@@ -653,24 +655,32 @@ async def choose_card(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return GET_CARD_NUMBER
 
 
-# --- DEPOSIT FLOW HANDLERS ---
+# --- DEPOSIT FLOW HANDLERS (FIXED RESPONSE ISSUE) ---
 
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the deposit conversation, providing Telebirr details and user ID."""
     
+    # Use effective_message which is available for both CommandHandler and CallbackQueryHandler (via query.edit_message_text)
     message = update.effective_message
     if not message:
-        return ConversationHandler.END
+        # If no message object (e.g., from an answered query), try to use the query
+        if update.callback_query:
+            message = update.callback_query.message
+        if not message:
+            logger.error("Deposit command called without effective_message or callback_query message.")
+            return ConversationHandler.END
         
-    user = message.from_user
+    user = update.effective_user
     
+    # Use HTML for better formatting and copy-paste capability for ID
     telebirr_link = f"<a href='tel:{TELEBIRR_ACCOUNT}'><u>{TELEBIRR_ACCOUNT}</u></a>"
     user_id_str = f"<code>{user.id}</code>" 
     
+    # The fix ensures a robust, immediate response here:
     await message.reply_html(
         f"💵 **ገንዘብ ለማስገባት** 💵\n\n"
         f"1. **ገንዘብ ያስገቡ:** በመጀመሪያ፣ ገንዘቡን ወደሚከተለው የቴሌብር ቁጥር ያስገቡ:\n"
-        f"   🔗 የቴሌብር አካውንት: **{telebirr_link}** (ቁጥሩን ለመቅዳት ይጫኑት)\n"
+        f"   🔗 የቴሌብር አካውንት: **{telebirr_link}**\n"
         f"   **⚠️ የእርስዎ መታወቂያ (User ID):** {user_id_str}\n" 
         f"   *(ይህ ID ክፍያዎን ለማረጋገጥ አስፈላጊ ነው)*\n\n"
         f"2. እባክዎ ያስገቡትን **ጠቅላላ መጠን (ብር)** በቁጥር ብቻ ይጻፉልኝ።\n"
@@ -686,6 +696,7 @@ async def handle_deposit_callback(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer() 
     
+    # This calls the main deposit command logic, which replies and moves to the next state
     return await deposit_command(update, context) 
 
 async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -886,7 +897,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"🏆 **የአዲስ ቢንጎ ህጎች** 🏆\n\n"
         f"1. **ካርድ መግዛት:** /play የሚለውን ትዕዛዝ በመጠቀም የሚፈልጉትን የካርድ ቁጥር ይምረጡ። አንድ ካርድ {CARD_COST:.2f} ብር ነው።\n"
         f"2. **ጨዋታ መጀመር:** ቢያንስ {MIN_PLAYERS_TO_START} ተጫዋቾች ሲኖሩ ጨዋታው ይጀምራል።\n"
-        "3. **የቁጥር ጥሪ:** ቦቱ በየ2.00004 ሰከንዱ ቁጥር ይጠራል (B-1 እስከ O-75)።\n"
+        f"3. **የቁጥር ጥሪ:** ቦቱ በየ{CALL_INTERVAL} ሰከንዱ ቁጥር ይጠራል (B-1 እስከ O-75)።\n"
         "4. **መሙላት:** ቁጥሩ በካርድዎ ላይ ካለ፣ አረንጓዴ (🟢) ይሆናል። ወዲያውኑ አረንጓዴውን ቁጥር **Mark** የሚለውን ቁልፍ በመጫን ምልክት ያድርጉበት።\n"
         "5. **ማሸነፍ:** አምስት ቁጥሮችን በተከታታይ (አግድም፣ ቁመታዊ ወይም ሰያፍ) በፍጥነት የመሙላት የመጀመሪያው ተጫዋች ሲሆኑ፣ **🚨 BINGO 🚨** የሚለውን ቁልፍ ይጫኑ።\n"
         f"6. **ሽልማት:** አሸናፊው ከጠቅላላው የጨዋታ ገንዳ {PRIZE_POOL_PERCENTAGE*100}% ያሸንፋል።"
@@ -908,10 +919,21 @@ async def quickplay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await play_command(update, context) 
 
 async def cancel_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    global LOBBY_STATE
     if LOBBY_STATE.get('is_running'):
         LOBBY_STATE['is_running'] = False
         LOBBY_STATE['display_total'] = None
-    
+        if LOBBY_STATE['msg_id']:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=LOBBY_STATE['chat_id'], 
+                    message_id=LOBBY_STATE['msg_id'], 
+                    text="📢 የቢንጎ ሎቢ ተሰርዟል! አዲስ ጨዋታ ለመጀመር /play ይጫኑ።",
+                )
+            except Exception as e:
+                logger.warning(f"Failed to edit lobby message on cancel: {e}")
+        LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None, 'display_total': None}
+
     user_id = update.effective_user.id
     if user_id in PENDING_PLAYERS:
         del PENDING_PLAYERS[user_id]
@@ -1149,7 +1171,7 @@ def build_card_keyboard(card: Dict[str, Any], game_id: str, message_id: int, las
         InlineKeyboardButton("🚨 BINGO 🚨", callback_data=f"bingo_{game_id}_{message_id}"),
     ]
     
-    # If the last called number is provided, use it for the synchronized display
+    # Synchronization FIX: Show the currently called number on the player's card
     if last_call is not None:
          kb.append([InlineKeyboardButton(f"🔔 Call: {get_bingo_call(last_call)}", callback_data='NOOP')])
          
@@ -1188,7 +1210,7 @@ async def mark_called_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 newly_marked += 1
                 
     if newly_marked > 0:
-        # Rebuild and update the card keyboard
+        # Rebuild and update the card keyboard, ensuring the latest call is displayed
         last_call = game['called_numbers'][-1] if game.get('called_numbers') else None
         kb = build_card_keyboard(card, game_id, query.message.message_id, last_call)
         
@@ -1252,11 +1274,10 @@ async def main() -> None:
     
     # --- Conversation Handlers ---
     
-    # 1. Deposit Conversation
+    # 1. Deposit Conversation (FIXED: Ensures both /deposit command and inline button work)
     deposit_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("deposit", deposit_command),
-            # This handler is the one that fixes the inline button issue from /play
             CallbackQueryHandler(handle_deposit_callback, pattern='^deposit_start$')
         ],
         states={
@@ -1334,16 +1355,5 @@ async def main() -> None:
         logger.info("Starting bot using polling...")
         await app.run_polling(poll_interval=3)
 
-# Note: The main call below is the source of the 'Cannot close a running event loop' error 
-# when Render attempts to manage the Python process's lifecycle. 
-# We rely on the external 'python -m asyncio -c ...' command to handle the event loop safely.
-# Therefore, we remove the direct asyncio.run(main()) here and rely on the RENDER START COMMAND.
-# (Leaving it in would duplicate the call when using the special command).
-
-# if __name__ == '__main__':
-#     try:
-#         asyncio.run(main())
-#     except KeyboardInterrupt:
-#         logger.info("Bot stopped by user.")
-#     except Exception as e:
-#         logger.error(f"Bot failed to start or run: {e}")
+# CRITICAL REMINDER: For Render, you MUST use the following Start Command:
+# python -m asyncio -c 'from addisbingo_v55_complete import main; asyncio.run(main())'
