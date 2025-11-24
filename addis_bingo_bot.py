@@ -34,11 +34,11 @@ MIN_WITHDRAW = 100.00 # CRITICAL: Minimum withdrawal set to 100 Birr
 REFERRAL_BONUS = 10.00
 MAX_PRESET_CARDS = 200 
 MIN_PLAYERS_TO_START = 1 
-MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 20 
+MIN_REAL_PLAYERS_FOR_ORGANIC_GAME = 20 # Threshold for starting organic game without bot padding
 PRIZE_POOL_PERCENTAGE = 0.80 
 BOT_WIN_CALL_THRESHOLD = 30 
 
-# Ethiopian names for bot stealth mode
+# Ethiopian names for bot stealth mode (Retained)
 ETHIOPIAN_MALE_NAMES = [
     "Abel", "Adane", "Biniyam", "Dawit", "Elias", "Firaol", "Getnet", "Henok", "Isaias", 
     "Kaleb", "Leul", "Million", "Nahom", "Natnael", "Samuel", "Surafel", "Tadele", "Yared", 
@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 PREVIOUS_STATE_KEY = "!!!PREVIOUS_STATE_SNAPSHOT!!!" 
-MIGRATION_VERSION = 5.2 # Version incremented for withdraw flow and countdown implementation
+MIGRATION_VERSION = 5.4 # Version incremented for promotional count variability update (20-39)
 
 # In-memory database simulation for user data 
 USER_DB: Dict[int, Dict[str, Any]] = {
@@ -75,7 +75,8 @@ USER_DB: Dict[int, Dict[str, Any]] = {
 # Active Game States 
 PENDING_PLAYERS: Dict[int, int] = {} 
 ACTIVE_GAMES: Dict[str, Dict[str, Any]] = {} 
-LOBBY_STATE: Dict[str, Any] = {'is_running': False, 'msg_id': None, 'chat_id': None}
+# LOBBY_STATE now stores 'display_total' for consistent promotional count
+LOBBY_STATE: Dict[str, Any] = {'is_running': False, 'msg_id': None, 'chat_id': None, 'display_total': None}
 BINGO_CARD_SETS: Dict[int, Dict[str, Any]] = {} 
 
 
@@ -263,7 +264,6 @@ async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: 
 
 async def run_game_loop(ctx: ContextTypes.DEFAULT_TYPE, game_id: str):
     """The main game loop that calls numbers and manages win conditions."""
-    # (Game loop logic remains largely the same)
     game = ACTIVE_GAMES.get(game_id)
     if not game: return
     
@@ -376,26 +376,17 @@ async def run_lobby_countdown(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Runs a 10-second countdown before starting the game."""
     global LOBBY_STATE
     
-    if not LOBBY_STATE['is_running'] or LOBBY_STATE['msg_id'] is None:
+    if not LOBBY_STATE['is_running'] or LOBBY_STATE['msg_id'] is None or LOBBY_STATE['display_total'] is None:
         return 
 
     main_chat_id = LOBBY_STATE['chat_id']
     msg_id = LOBBY_STATE['msg_id']
     
-    # Get total players before countdown
-    initial_real_players = len(PENDING_PLAYERS)
+    display_total = LOBBY_STATE['display_total']
     
     for count in range(10, 0, -1):
         if not LOBBY_STATE['is_running']: return # Check if cancelled
         
-        # Calculate promotional count based on initial real players
-        if initial_real_players < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME:
-            # Add a stable number of bots for the display
-            display_bots = 30 
-            display_total = initial_real_players + display_bots
-        else:
-            display_total = initial_real_players
-
         display_others_count = display_total - 1 
 
         message = (
@@ -429,10 +420,11 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         BINGO_CARD_SETS = generate_bingo_card_set()
         
     if not PENDING_PLAYERS:
-        LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None}
+        LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None, 'display_total': None}
         return
 
     main_chat_id = LOBBY_STATE['chat_id']
+    promotional_total_players = LOBBY_STATE.get('display_total') # Use the stored count
     
     # Send final "Game Started" update to the lobby message
     if LOBBY_STATE['msg_id']:
@@ -446,7 +438,7 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             pass # Ignore if message wasn't found or modified
             
-    LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None} 
+    LOBBY_STATE = {'is_running': False, 'msg_id': None, 'chat_id': None, 'display_total': None} # Reset LOBBY_STATE
 
     game_id = str(random.randint(100000, 999999))
     real_players = list(PENDING_PLAYERS.keys())
@@ -473,9 +465,10 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     all_players = list(real_players) 
 
-    if is_promotional_game:
-        # Bot count ensures total players is >= MIN_REAL_PLAYERS_FOR_ORGANIC_GAME (20) + up to 19 more
-        num_bots = random.randint(MIN_REAL_PLAYERS_FOR_ORGANIC_GAME - real_player_count, 38)
+    # --- Promotional Bot Addition Logic (Fixed to match stored display_total) ---
+    if is_promotional_game and promotional_total_players is not None and promotional_total_players > real_player_count:
+        
+        num_bots = promotional_total_players - real_player_count
         bot_ids = [-(i + 1) for i in range(num_bots)]
         winning_bot_id = random.choice(bot_ids) 
         
@@ -505,7 +498,8 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             }
         
         logger.info(f"PROMOTIONAL MODE (Stealth): Game {game_id} started with {len(all_players)} total players ({real_player_count} real + {num_bots} bots). Bot {winning_bot_id} is guaranteed to win.")
-        
+    # --- End Promotional Logic ---
+
     ACTIVE_GAMES[game_id] = {
         'id': game_id,
         'chat_id': main_chat_id, 
@@ -524,11 +518,11 @@ async def start_new_game(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     
     for uid in real_players:
         
-        others_count = total_players - 1 # Use total players count for display
+        others_count = total_players - 1 # Use the actual total players count for display
         
         game_msg_text = (
             f"🚨 **ቢንጎ ጨዋታ #{game_id} ተጀምሯል!** 🚨\n\n"
-            f"📢 አሁን ያለን ተጫዋች: **እርስዎ እና ሌሎች {others_count} ተጫዋቾች ተቀላቅለዋል!**\n" 
+            f"📢 አሁን ያለን ተጫዋች: **እርስዎ እና ሌሎች {others_count} ተጫዋቾች ተቀላቅለዋል!**\n"
             f"💵 ጠቅላላ የሽልማት ገንዳ: **{total_pot:.2f} ብር** ({total_players} ተጫዋቾች x {CARD_COST:.2f} ብር)\n"
             f"✂️ የቤት ድርሻ (20%): {house_cut:.2f} ብር\n"
             f"💰 ለአሸናፊው የተጣራ ሽልማት (80%): **{prize_money:.2f} ብር**\n\n" 
@@ -603,6 +597,11 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
     """Handles the player's chosen card number, validates it, and finalizes the purchase."""
     user_id = update.effective_user.id
     
+    # CRITICAL: If the user sends a non-text or a command here, handle it gracefully.
+    if update.message.text is None or update.message.text.startswith('/'):
+        await update.message.reply_text("❌ እባክዎ ትክክለኛ የካርድ ቁጥር (ቁጥር ብቻ) ያስገቡ።")
+        return GET_CARD_NUMBER
+        
     try:
         card_num = int(update.message.text.strip())
     except ValueError:
@@ -634,20 +633,22 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
         "⚠️ ጨዋታው በቅርቡ ይጀምራል። እባክዎ ይጠብቁ።"
     )
     
-    # --- COUNTDOWN TRIGGER LOGIC ---
+    # --- COUNTDOWN/LOBBY LOGIC (Updated for Variable Count 20-39) ---
     if not LOBBY_STATE['is_running'] and len(PENDING_PLAYERS) >= MIN_PLAYERS_TO_START:
         LOBBY_STATE['is_running'] = True
         LOBBY_STATE['chat_id'] = update.effective_chat.id
         
         initial_real_players = len(PENDING_PLAYERS)
         
-        # Calculate promotional count based on initial real players
+        # 1. Calculate promotional total count (20-39) and store it in LOBBY_STATE
         if initial_real_players < MIN_REAL_PLAYERS_FOR_ORGANIC_GAME:
-            display_bots = 30 # A stable, high number for promotional display
-            display_total = initial_real_players + display_bots
+            # Set display total between 20 and 39 (inclusive)
+            display_total = random.randint(20, 39) # <--- ADJUSTED RANGE
         else:
             display_total = initial_real_players
-
+        
+        LOBBY_STATE['display_total'] = display_total # Store for consistent messaging
+        
         display_others_count = display_total - 1 
         
         # Send initial lobby message (will be edited by countdown)
@@ -664,7 +665,7 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
-# --- DEPOSIT FLOW HANDLERS (FIXED/RETAINED) ---
+# --- DEPOSIT FLOW HANDLERS (FIXED) ---
 
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the deposit conversation, providing Telebirr details and user ID."""
@@ -689,6 +690,11 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Validates the deposit amount and prompts for the receipt."""
+    # CRITICAL FIX: Ensure only valid text is processed, otherwise repeat state
+    if update.message.text is None or update.message.text.startswith('/'):
+        await update.message.reply_text("❌ እባክዎ ትክክለኛ የብር መጠን በቁጥር ያስገቡ።")
+        return GET_DEPOSIT_AMOUNT
+        
     try:
         amount = float(update.message.text.strip())
         
@@ -718,6 +724,7 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ የስህተት: የማስገቢያው መጠን ጠፍቷል። እባክዎ ሂደቱን እንደገና በ /deposit ይጀምሩ።")
         return ConversationHandler.END
 
+    # Check if the message contains a photo OR a document
     if update.message.photo or update.message.document:
         
         # Log pending transaction
@@ -734,6 +741,7 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             # Send message to admin user ID
             if update.message.photo:
+                # Send the largest photo size
                 await context.bot.send_photo(
                     chat_id=ADMIN_USER_ID,
                     photo=update.message.photo[-1].file_id,
@@ -759,16 +767,18 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception as e:
             logger.error(f"Error forwarding receipt to admin {ADMIN_USER_ID}: {e}")
             await update.message.reply_text(f"❌ ስህተት ተፈጥሯል። ማረጋገጫውን (receipt) ለአስተዳዳሪው መላክ አልተቻለም። ስህተቱ፡ {e}")
-            return WAITING_FOR_RECEIPT
+            # If sending to admin fails, we don't want to get stuck in the state. End the flow.
+            return ConversationHandler.END
             
         return ConversationHandler.END
         
     else:
+        # If input is not photo/document (e.g., text) re-prompt
         await update.message.reply_text("❌ እባክዎ የክፍያ ማረጋገጫውን በ **ፎቶ ወይም በ Document** መልክ ብቻ ይላኩልኝ።")
         return WAITING_FOR_RECEIPT
 
 
-# --- WITHDRAWAL FLOW HANDLERS (NEWLY IMPLEMENTED) ---
+# --- WITHDRAWAL FLOW HANDLERS (RETAINED) ---
 
 async def withdraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the withdrawal conversation."""
@@ -799,6 +809,10 @@ async def get_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
     current_balance = context.user_data.get('balance', 0.0)
     
+    if update.message.text is None or update.message.text.startswith('/'):
+        await update.message.reply_text("❌ እባክዎ ትክክለኛ የብር መጠን በቁጥር ያስገቡ።")
+        return GET_WITHDRAW_AMOUNT
+        
     try:
         amount = float(update.message.text.strip())
         
@@ -902,6 +916,8 @@ async def quickplay_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def cancel_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if LOBBY_STATE.get('is_running'):
         LOBBY_STATE['is_running'] = False # Stop the countdown
+        # Clear the promotional count if the lobby was running
+        LOBBY_STATE['display_total'] = None
     
     # Check if user was in a pending game and remove card purchase effect
     user_id = update.effective_user.id
@@ -951,7 +967,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# --- ADMIN HANDLERS ---
+# --- ADMIN HANDLERS (RETAINED) ---
 async def check_admin(user_id: int) -> bool:
     return user_id == ADMIN_USER_ID
 
@@ -1241,6 +1257,7 @@ def main():
         entry_points=[CommandHandler("deposit", deposit_command)],
         states={
             GET_DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)],
+            # WAITING_FOR_RECEIPT now strictly expects PHOTO or DOCUMENT
             WAITING_FOR_RECEIPT: [MessageHandler(filters.PHOTO | filters.Document.ALL & ~filters.COMMAND, handle_receipt)],
         },
         fallbacks=[CommandHandler('cancel', cancel_play)],
