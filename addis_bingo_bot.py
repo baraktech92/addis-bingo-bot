@@ -22,6 +22,7 @@ from typing import Dict, Any, Optional
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE") 
 
 # CRITICAL FIX: Admin User ID for forwarding deposits and access to admin commands
+# !!! CHANGE THIS TO YOUR ACTUAL TELEGRAM USER ID !!!
 ADMIN_USER_ID = 5887428731 
 
 TELEBIRR_ACCOUNT = "0927922721" # Account for user deposits (Amharic: ለተጠቃሚዎች ገንዘብ ማስገቢያ አካውንት)
@@ -1125,7 +1126,7 @@ def build_card_keyboard(card: Dict[str, Any], game_id: str, message_id: int, las
             pos = (c, r)
             
             is_marked = card['marked'].get(pos, False)
-            is_called = card['called'].get(pos, False)
+            is_called = card['called'].get(pos)
 
             if value == "FREE":
                 text = "⭐"
@@ -1317,22 +1318,32 @@ async def main() -> None:
     if RENDER_EXTERNAL_URL:
         # Use webhooks for deployment environments like Render
         logger.info("Starting bot using webhooks...")
-        await app.bot.set_webhook(url=RENDER_EXTERNAL_URL)
+        await app.bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/{TOKEN}") # Use the token as the path
+        # Render provides a PORT environment variable, usually 8080 or similar.
+        port = int(os.environ.get("PORT", "8080"))
+        
+        # When running under a custom start command (like the one we recommended), 
+        # the bot's internal web server needs to run on the listening port.
         await app.run_webhook(
             listen="0.0.0.0",
-            port=int(os.environ.get("PORT", "8080")),
-            url_path=TOKEN # Use the token as the URL path for security
+            port=port,
+            url_path=TOKEN # Matches the path set in set_webhook
         )
     else:
         # Use polling for local development or simple environments
         logger.info("Starting bot using polling...")
         await app.run_polling(poll_interval=3)
 
-if __name__ == '__main__':
-    # This ensures the application starts correctly when the script is executed
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
-    except Exception as e:
-        logger.error(f"Bot failed to start or run: {e}")
+# Note: The main call below is the source of the 'Cannot close a running event loop' error 
+# when Render attempts to manage the Python process's lifecycle. 
+# We rely on the external 'python -m asyncio -c ...' command to handle the event loop safely.
+# Therefore, we remove the direct asyncio.run(main()) here and rely on the RENDER START COMMAND.
+# (Leaving it in would duplicate the call when using the special command).
+
+# if __name__ == '__main__':
+#     try:
+#         asyncio.run(main())
+#     except KeyboardInterrupt:
+#         logger.info("Bot stopped by user.")
+#     except Exception as e:
+#         logger.error(f"Bot failed to start or run: {e}")
