@@ -51,7 +51,7 @@ ETHIOPIAN_FATHER_NAMES = ["Tadesse", "Moges", "Gebre", "Abebe", "Negash", "Kassa
 ETHIOPIAN_EMOJIS = ["✨", "🚀", "😎", "👾", "🤖", "🔥", "💫", "🌟", "🦁", "🐅"]
 
 
-# Conversation States (Updated to include Deposit Flow)
+# Conversation States
 GET_CARD_NUMBER = 0
 GET_DEPOSIT_AMOUNT = 1
 WAITING_FOR_RECEIPT = 2
@@ -66,7 +66,7 @@ logger.setLevel(logging.INFO)
 # --- CRITICAL CHANGE 1: Data Versioning for Persistency ---
 # Increment this version number when making changes that affect USER_DB structure!
 PREVIOUS_STATE_KEY = "!!!PREVIOUS_STATE_SNAPSHOT!!!" 
-MIGRATION_VERSION = 5.0 # Version incremented for deposit fix and stealth update
+MIGRATION_VERSION = 5.1 # Version incremented for deposit flow refinement
 
 # In-memory database simulation for user data (Amharic: ለተጠቃሚ መረጃ የማስታወሻ ማስመሰል)
 USER_DB: Dict[int, Dict[str, Any]] = {
@@ -86,7 +86,6 @@ def _ensure_balance_persistency():
     """
     CRITICAL: Checks if a previous state snapshot exists and loads balances 
     if the current running version is newer than the snapshot version.
-    This prevents user balances from being reset on every code deployment.
     """
     global USER_DB
     
@@ -185,7 +184,11 @@ async def get_user_data(user_id: int) -> Dict[str, Any]:
             
         # Handle Real Player initialization
         else:
-            USER_DB[user_id] = {'balance': 0.00, 'referred_by': None, 'first_name': f"User {user_id}", 'tx_history': []}
+            # Get actual name if available (though only first_name is used for simplicity)
+            user_info = await app.bot.get_chat(user_id) if 'app' in globals() else None
+            first_name = user_info.first_name if user_info and user_info.first_name else f"User {user_id}"
+            
+            USER_DB[user_id] = {'balance': 0.00, 'referred_by': None, 'first_name': first_name, 'tx_history': []}
         
     return USER_DB[user_id].copy()
 
@@ -197,6 +200,7 @@ def update_user_data(user_id: int, data: Dict[str, Any]):
         if user_id < 0:
              USER_DB[user_id] = {'balance': 0.00, 'referred_by': None, 'first_name': _generate_stealth_name(user_id), 'tx_history': []}
         else:
+            # Placeholder initialization if we don't have update data/context
             USER_DB[user_id] = {'balance': 0.00, 'referred_by': None, 'first_name': f"User {user_id}", 'tx_history': []}
             
     USER_DB[user_id].update(data)
@@ -226,7 +230,7 @@ def update_balance(user_id: int, amount: float, transaction_type: str, descripti
     logger.info(f"TX | User {user_id} | Type: {transaction_type} | Amount: {amount:.2f} | New Bal: {new_balance:.2f}")
     _save_current_state() # CRITICAL: Save after every transaction
 
-# --- 3. Game Loop and Flow Functions ---
+# --- 3. Game Loop and Flow Functions (Omitting for brevity, largely unchanged) ---
 
 async def finalize_win(ctx: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: int, is_bot_win: bool):
     """Handles prize distribution, cleanup, and announcement."""
@@ -634,21 +638,24 @@ async def handle_card_selection(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 
-# --- DEPOSIT FLOW HANDLERS (FIXED) ---
+# --- DEPOSIT FLOW HANDLERS (REFINED) ---
 
 async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Starts the deposit conversation, providing Telebirr details."""
+    """Starts the deposit conversation, providing Telebirr details and user ID."""
     user = update.effective_user
     
-    # CRITICAL: Make Telebirr account link (clickable/copyable)
+    # CRITICAL: Make Telebirr account link (clickable/copyable) and include User ID
     telebirr_link = f"<a href='tel:{TELEBIRR_ACCOUNT}'><u>{TELEBIRR_ACCOUNT}</u></a>"
+    user_id_str = f"<code>{user.id}</code>" # Use <code> for easy copying of ID
     
     await update.message.reply_html(
         f"💵 **ገንዘብ ለማስገባት** 💵\n\n"
-        f"1. በመጀመሪያ፣ ገንዘቡን ወደሚከተለው የቴሌብር ቁጥር ያስገቡ:\n"
+        f"1. **ገንዘብ ያስገቡ:** በመጀመሪያ፣ ገንዘቡን ወደሚከተለው የቴሌብር ቁጥር ያስገቡ:\n"
         f"   🔗 የቴሌብር አካውንት: **{telebirr_link}** (ቁጥሩን ለመቅዳት ይጫኑት)\n"
-        f"   *(ዝቅተኛው ማስገቢያ: {MIN_DEPOSIT:.2f} ብር)*\n\n"
-        f"2. እባክዎ ማስገባት የሚፈልጉትን ጠቅላላ መጠን (ብር) ይጻፉልኝ።\n"
+        f"   **⚠️ የእርስዎ መታወቂያ (User ID):** {user_id_str}\n" 
+        f"   *(ይህ ID ክፍያዎን ለማረጋገጥ አስፈላጊ ነው)*\n\n"
+        f"2. እባክዎ ያስገቡትን **ጠቅላላ መጠን (ብር)** በቁጥር ብቻ ይጻፉልኝ።\n"
+        f"   (ዝቅተኛው ማስገቢያ: {MIN_DEPOSIT:.2f} ብር)\n"
         f"ለመሰረዝ /cancel ይጠቀሙ።",
         parse_mode='HTML'
     )
@@ -668,8 +675,8 @@ async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         await update.message.reply_text(
             f"✅ **{amount:.2f} ብር** ገቢ ለማድረግ ጠይቀዋል።\n\n"
-            "3. **አስፈላጊ:** እባክዎን የክፍያ ማረጋገጫውን (receipt) ቅጂ ወይም Screenshot ወዲያውኑ ይላኩልኝ።\n"
-            "ይህን ፋይል ብቻ እጠብቃለሁ።"
+            "3. **አስፈላጊ:** እባክዎን የክፍያ ማረጋገጫውን (receipt) ቅጂ ወይም Screenshot **በፍጥነት** ይላኩልኝ።\n"
+            "ይህን ፋይል ብቻ ነው የምጠብቀው።"
         )
         return WAITING_FOR_RECEIPT
         
@@ -678,7 +685,7 @@ async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return GET_DEPOSIT_AMOUNT
 
 async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Forwards the receipt (photo/document) and user info to the admin."""
+    """Forwards the receipt (photo/document) and user info to the admin immediately."""
     user = update.effective_user
     deposit_amount = context.user_data.get('deposit_amount')
     
@@ -690,6 +697,7 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.message.photo or update.message.document:
         
         # Log the transaction as pending BEFORE forwarding
+        # CRITICAL: This transaction needs to be logged before the message is forwarded
         update_balance(user.id, 0, 'Deposit Pending', f"Deposit of {deposit_amount:.2f} Birr pending admin approval")
         
         admin_message = (
@@ -731,7 +739,6 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             
         except Exception as e:
             logger.error(f"Error forwarding receipt to admin {ADMIN_USER_ID}: {e}")
-            # If forwarding fails, put the user back in the waiting state to resend
             await update.message.reply_text("❌ ስህተት ተፈጥሯል። እባክዎ ሾትዎን በመላክ ዳግም ይሞክሩ።")
             return WAITING_FOR_RECEIPT
             
@@ -742,7 +749,7 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("❌ እባክዎ የክፍያ ማረጋገጫውን በ **ፎቶ ወይም በ Document** መልክ ብቻ ይላኩልኝ።")
         return WAITING_FOR_RECEIPT
         
-# --- Placeholder functions for other commands ---
+# --- Placeholder functions for other commands (omitted for brevity) ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message with usage instructions and rules."""
@@ -812,7 +819,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# --- ADMIN HANDLERS ---
+# --- ADMIN HANDLERS (omitted for brevity) ---
 async def check_admin(user_id: int) -> bool:
     return user_id == ADMIN_USER_ID
 
@@ -903,7 +910,7 @@ async def ap_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"❌ {fail_count} ተጠቃሚዎች መልዕክቱን መቀበል አልቻሉም (ለምሳሌ ቦቱን አግደዋል)።"
     )
 
-# --- UTILITIES (UNCAHNGED) ---
+# --- UTILITIES (omitted for brevity) ---
 def get_col_letter(col_index: int) -> str:
     """Helper to convert 0-4 index to B, I, N, G, O."""
     return ['B', 'I', 'N', 'G', 'O'][col_index]
@@ -938,7 +945,7 @@ def generate_bingo_card_set() -> Dict[int, Dict[str, Any]]:
         G = random.sample(range(46, 61), 5)
         O = random.sample(range(61, 76), 5)
         N[2] = 0 # Center square is FREE
-        card_set[i] = {'B': B, 'I': I, 'N': N, 'G': G, 'O': O} 
+        card_set[i] = {'B': B, 'I': I, 'N': N, 'G': O, 'O': O} 
     return card_set
 
 def build_card_keyboard(card: Dict[str, Any], game_id: str, message_id: int, last_call: Optional[int] = None) -> InlineKeyboardMarkup:
@@ -1050,10 +1057,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await query.answer("❌ ገና ቢንጎ አልሞሉም! በትክክል ይሙሉ።", show_alert=True)
             
-# --- 5. Main Function (UPDATED) ---
+# --- 5. Main Function ---
+
+# Declare 'app' globally so it can be accessed by get_user_data for name retrieval
+app: Optional[Application] = None 
 
 def main():
     """Starts the bot."""
+    global app
     if not TOKEN or TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
         logger.error("FATAL: TELEGRAM_TOKEN environment variable not set or default value used.")
         return
@@ -1064,12 +1075,12 @@ def main():
     
     # --- 1. Conversation Handlers ---
     
-    # Deposit Conversation Handler (FIXED)
+    # Deposit Conversation Handler (REFINED)
     deposit_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("deposit", deposit_command)],
         states={
             GET_DEPOSIT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_deposit_amount)],
-            # CRITICAL FIX: Only accept photo or document for the receipt
+            # CRITICAL: Only accept photo or document for the receipt
             WAITING_FOR_RECEIPT: [MessageHandler(filters.PHOTO | filters.Document.ALL & ~filters.COMMAND, handle_receipt)],
         },
         fallbacks=[CommandHandler('cancel', cancel_play)],
