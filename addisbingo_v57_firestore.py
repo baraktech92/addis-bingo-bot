@@ -1,4 +1,4 @@
-# Addis Bingo Bot - Version 5.7.1 (Firestore Persistence)
+# Addis Bingo Bot - Version 5.7.2 (Firestore Persistence)
 # Author: Gemini
 # Description: Telegram Bingo game bot with persistent user balances and game state
 #              using Google Firestore via the Firebase Admin SDK.
@@ -13,7 +13,6 @@ import logging
 import tempfile
 
 # --- Database Imports (Firebase Admin SDK) ---
-# NOTE: The entire structure is unchanged from v5.7, only the main execution block is modified.
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -87,6 +86,11 @@ async def load_global_state():
     """Loads global game state from Firestore."""
     global global_state
     
+    if not db:
+        logger.warning("DB not initialized. Using default state.")
+        global_state = { 'is_game_active': False, 'current_game_id': 0, 'active_players': {}, 'total_prize_pool': 0.0, 'current_numbers': [] }
+        return
+        
     try:
         # Use a single document for global state
         doc_ref = db.collection('global_state').document('current')
@@ -116,6 +120,7 @@ async def load_global_state():
 
 async def save_global_state():
     """Saves global game state to Firestore."""
+    if not db: return # Skip if DB is disabled/failed
     try:
         doc_ref = db.collection('global_state').document('current')
         await doc_ref.set(global_state)
@@ -127,6 +132,11 @@ async def save_global_state():
 async def get_user_data(user_id: int) -> dict:
     """Retrieves or creates a user's data from Firestore."""
     user_id_str = str(user_id)
+    
+    if not db: 
+        logger.warning(f"DB not initialized. Returning dummy data for user {user_id}.")
+        return { 'user_id': user_id, 'balance': 0.0, 'cards': {}, 'registration_time': time.time() }
+
     doc_ref = db.collection('users').document(user_id_str)
     
     try:
@@ -153,6 +163,7 @@ async def get_user_data(user_id: int) -> dict:
 
 async def save_user_data(user_data: dict) -> bool:
     """Saves a user's data to Firestore."""
+    if not db: return False # Skip if DB is disabled/failed
     user_id_str = str(user_data['user_id'])
     doc_ref = db.collection('users').document(user_id_str)
     
@@ -167,7 +178,7 @@ async def save_user_data(user_data: dict) -> bool:
 # ==============================================================================
 # ----------------------------- BINGO GAME LOGIC -------------------------------
 # ==============================================================================
-# ... (All Bingo logic functions remain the same) ...
+# ... (Bingo logic functions remain the same) ...
 
 def generate_bingo_card():
     """Generates a standard 5x5 Bingo card (B-I-N-G-O)."""
@@ -574,10 +585,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 async def check_and_start_game(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Checks if minimum players are met and the interval has passed to start a new game."""
     
-    if not db:
-        logger.warning("DB not initialized. Skipping game check.")
-        return
-        
+    # We must allow the game logic to run even if DB is not initialized
+    
     if global_state.get('is_game_active'):
         return
 
@@ -691,11 +700,11 @@ async def post_init(application: Application):
     """Initializes DB and loads state after bot initialization."""
     
     try:
-       # initialize_firebase()
+        # initialize_firebase() # <--- TEMPORARILY DISABLED FOR DEBUGGING
+        pass # <-- FIX: Added 'pass' to prevent IndentationError
     except Exception:
         logger.critical("Bot cannot run without Firebase Initialization. Shutting down.")
         # If Firebase fails, we let the exception propagate to crash the process
-        # This will be handled by the main function's execution environment
         raise 
 
     await load_global_state() # Load initial state from DB
@@ -709,14 +718,20 @@ async def post_init(application: Application):
     )
     logger.info("Game scheduler task started.")
     
+    # CRITICAL: This is where we check if RENDER_URL is set
+    if RENDER_URL == "YOUR_RENDER_URL_HERE":
+        logger.critical("FATAL: RENDER_EXTERNAL_URL is not set correctly. Bot cannot set webhook.")
+        # Raise an exception if the URL is not set, forcing a crash to signal the error
+        raise ValueError("RENDER_EXTERNAL_URL is not set.")
+        
     await application.bot.set_webhook(url=f"{RENDER_URL}{WEBHOOK_PATH}")
     logger.info(f"Webhook set to {RENDER_URL}{WEBHOOK_PATH}")
 
 
 async def main() -> None:
     """Starts the bot in Webhook mode for Render deployment."""
-    if not all([TOKEN, RENDER_URL]) or TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        logger.critical("FATAL: TELEGRAM_TOKEN or RENDER_EXTERNAL_URL environment variables are not set. Exiting.")
+    if not TOKEN or TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
+        logger.critical("FATAL: TELEGRAM_TOKEN environment variable is not set. Exiting.")
         return
 
     logger.info("Starting Webhook Mode on Render...")
@@ -751,7 +766,6 @@ def run_main_sync():
         asyncio.run(main())
     except Exception as e:
         # Log the error, but let the process exit naturally
-        # The 'Cannot close...' error often originates from asyncio's cleanup phase
         logger.critical(f"Bot execution failed: {e}")
         # Re-raise the exception for Render to catch the failure
         raise
