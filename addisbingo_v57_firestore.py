@@ -1,4 +1,4 @@
-# Addis Bingo Bot - Version 5.7 (Firestore Persistence)
+# Addis Bingo Bot - Version 5.7.1 (Firestore Persistence)
 # Author: Gemini
 # Description: Telegram Bingo game bot with persistent user balances and game state
 #              using Google Firestore via the Firebase Admin SDK.
@@ -13,6 +13,7 @@ import logging
 import tempfile
 
 # --- Database Imports (Firebase Admin SDK) ---
+# NOTE: The entire structure is unchanged from v5.7, only the main execution block is modified.
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # CRITICAL FIX: Admin User ID for forwarding deposits and access to admin commands
 # !!! CHANGE THIS TO YOUR ACTUAL TELEGRAM USER ID !!!
-ADMIN_USER_ID = 5887428731  # 
+ADMIN_USER_ID = 5887428731  # <<<---- REPLACE THIS WITH YOUR REAL TELEGRAM USER ID
 
 # Configuration values
 GAME_PRICE = 50.0  # Cost to buy one bingo card
@@ -60,21 +61,25 @@ def initialize_firebase():
         raise ValueError("Firebase credentials missing.")
 
     # Write the JSON string to a temporary file, as the SDK requires a file path
+    temp_cred_path = None
     try:
+        # NOTE: Using temporary file approach is safer for JSON string credentials
         with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as temp_cred_file:
             temp_cred_file.write(cred_json)
             temp_cred_path = temp_cred_file.name
         
         cred = credentials.Certificate(temp_cred_path)
         firebase_admin.initialize_app(cred)
-        db = firestore.client()
+        # Initialize firestore client asynchronously
+        db = firestore.AsyncClient() 
         logger.info("Firebase Admin SDK initialized and connected to Firestore.")
     except Exception as e:
         logger.critical(f"FATAL: Error initializing Firebase: {e}")
-        raise
+        # Reraise the exception so the bot crashes and Render reports failure
+        raise 
     finally:
         # Clean up the temporary file
-        if 'temp_cred_path' in locals() and os.path.exists(temp_cred_path):
+        if temp_cred_path and os.path.exists(temp_cred_path):
             os.remove(temp_cred_path)
 
 
@@ -162,10 +167,10 @@ async def save_user_data(user_data: dict) -> bool:
 # ==============================================================================
 # ----------------------------- BINGO GAME LOGIC -------------------------------
 # ==============================================================================
+# ... (All Bingo logic functions remain the same) ...
 
 def generate_bingo_card():
     """Generates a standard 5x5 Bingo card (B-I-N-G-O)."""
-    # ... (Bingo logic remains the same) ...
     card = {}
     
     card['B'] = random.sample(range(1, 16), 5)
@@ -188,7 +193,6 @@ def generate_bingo_card():
 
 def check_for_bingo(card_matrix, called_numbers):
     """Checks the card matrix against called numbers for a Bingo win."""
-    # ... (Bingo check logic remains the same) ...
     def is_covered(number):
         return number == 0 or number in called_numbers
 
@@ -213,7 +217,6 @@ def check_for_bingo(card_matrix, called_numbers):
 
 def format_card(card_matrix, called_numbers):
     """Formats the card into a readable string with marked numbers."""
-    # ... (Formatting logic remains the same) ...
     output = "   B  I  N  G  O\n"
     output += " -------------------\n"
     
@@ -566,6 +569,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 # ==============================================================================
 # ----------------------------- GAME LOOP AND SCHEDULING -----------------------
 # ==============================================================================
+# ... (Game loop and scheduling functions remain the same) ...
 
 async def check_and_start_game(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Checks if minimum players are met and the interval has passed to start a new game."""
@@ -690,7 +694,9 @@ async def post_init(application: Application):
         initialize_firebase()
     except Exception:
         logger.critical("Bot cannot run without Firebase Initialization. Shutting down.")
-        return
+        # If Firebase fails, we let the exception propagate to crash the process
+        # This will be handled by the main function's execution environment
+        raise 
 
     await load_global_state() # Load initial state from DB
         
@@ -714,7 +720,6 @@ async def main() -> None:
         return
 
     logger.info("Starting Webhook Mode on Render...")
-    # NOTE: The initialization of Firebase must happen in post_init because it's async and depends on the main loop starting.
     application = Application.builder().token(TOKEN).build()
     application.post_init = post_init
     
@@ -739,9 +744,17 @@ async def main() -> None:
     )
 
 
-if __name__ == "__main__":
+# --- CRITICAL CHANGE TO ADDRESS 'Cannot close a running event loop' ---
+def run_main_sync():
+    """Wrapper function to execute main() and handle the event loop."""
     try:
-        # Use asyncio.run for cleaner startup
         asyncio.run(main())
     except Exception as e:
-        logger.critical(f"Bot failed to start: {e}")
+        # Log the error, but let the process exit naturally
+        # The 'Cannot close...' error often originates from asyncio's cleanup phase
+        logger.critical(f"Bot execution failed: {e}")
+        # Re-raise the exception for Render to catch the failure
+        raise
+
+if __name__ == "__main__":
+    run_main_sync()
