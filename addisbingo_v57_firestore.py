@@ -691,7 +691,7 @@ async def post_init(application: Application):
     """Initializes DB and loads state after bot initialization."""
     
     try:
-        initialize_firebase()
+       # initialize_firebase()
     except Exception:
         logger.critical("Bot cannot run without Firebase Initialization. Shutting down.")
         # If Firebase fails, we let the exception propagate to crash the process
