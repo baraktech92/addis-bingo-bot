@@ -1,39 +1,29 @@
-# Addis Bingo Bot - Version 5.8 (Final Reliable Setup)
+# Addis Bingo Bot - Version 32 (Simple In-Memory State)
 # Author: Gemini
-# Description: Telegram Bingo game bot with persistent user balances and state
-#              using Google Firestore via the Firebase Admin SDK.
-# CRITICAL FIX: Removed manual asyncio.run() call to resolve 'Event Loop Running' error.
-# Status: Firebase Initialization is now ENABLED.
+# Description: Telegram Bingo game bot using simple dictionary state.
+# Goal: Provide a clean, non-persistent file to test the Render deployment issue.
 
 import os
-import json
-import asyncio
 import time
-from datetime import datetime, timedelta
 import random
 import logging
-import tempfile
-
-# --- Database Imports (Firebase Admin SDK) ---
-# NOTE: AsyncClient is used for non-blocking Firestore operations.
-import firebase_admin
-from firebase_admin import credentials, firestore
+import asyncio
 
 # --- Python-Telegram-Bot Imports ---
-from telegram import Update, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # --- Configuration ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # !!! CHANGE THIS TO YOUR ACTUAL TELEGRAM USER ID !!!
-ADMIN_USER_ID = 5887428731  
+ADMIN_USER_ID = 5887428731
 
 # Configuration values
-GAME_PRICE = 50.0 
+GAME_PRICE = 50.0  
 INITIAL_BALANCE = 1000.0 
-MIN_PLAYERS = 2 
+MIN_PLAYERS = 2  
 GAME_INTERVAL_SECONDS = 300 
 CALL_INTERVAL_SECONDS = 15 
 
@@ -43,136 +33,39 @@ PORT = int(os.environ.get("PORT", 8080))
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "YOUR_RENDER_URL_HERE")
 WEBHOOK_PATH = "/webhook"
 
-# Global Firestore and State references
-db = None
-global_state = {}
-
+# --- In-Memory Global State ---
+# IMPORTANT: This state is NOT persistent and will reset on every redeploy or crash.
+user_data_db = {}
+global_state = {
+    'current_game_id': 0,
+    'current_numbers': [],
+    'is_game_active': False,
+    'last_game_time': time.time() - GAME_INTERVAL_SECONDS,
+    'last_call_time': time.time() - CALL_INTERVAL_SECONDS,
+    'active_players': {}, 
+    'total_prize_pool': 0.0
+}
 
 # ==============================================================================
-# ----------------------------- PERSISTENCE FUNCTIONS (FIRESTORE) -----------------
+# ----------------------------- STATE MANAGEMENT (IN-MEMORY) ---------------------
 # ==============================================================================
 
-def initialize_firebase():
-    """Initializes Firebase Admin SDK using credentials from environment variable."""
-    global db
-    
-    cred_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
-    if not cred_json:
-        logger.critical("FATAL: FIREBASE_CREDENTIALS_JSON environment variable not set.")
-        raise ValueError("Firebase credentials missing.")
-
-    temp_cred_path = None
-    try:
-        # Use a temporary file as the SDK requires a file path
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as temp_cred_file:
-            temp_cred_file.write(cred_json)
-            temp_cred_path = temp_cred_file.name
-        
-        cred = credentials.Certificate(temp_cred_path)
-        firebase_admin.initialize_app(cred)
-        # Use AsyncClient for non-blocking database access
-        db = firestore.AsyncClient() 
-        logger.info("Firebase Admin SDK initialized and connected to Firestore.")
-    except Exception as e:
-        logger.critical(f"FATAL: Error initializing Firebase: {e}")
-        # Reraise the exception so the bot crashes if persistence is broken
-        raise 
-    finally:
-        # Clean up the temporary file
-        if temp_cred_path and os.path.exists(temp_cred_path):
-            os.remove(temp_cred_path)
-
-
-async def load_global_state():
-    """Loads global game state from Firestore."""
-    global global_state
-    
-    if not db:
-        logger.warning("DB not initialized. Using default, non-persistent state.")
-        global_state = { 'is_game_active': False, 'current_game_id': 0, 'active_players': {}, 'total_prize_pool': 0.0, 'current_numbers': [] }
-        return
-        
-    try:
-        doc_ref = db.collection('global_state').document('current')
-        doc = await doc_ref.get()
-        
-        if doc.exists:
-            global_state = doc.to_dict()
-            logger.info("Global state loaded from Firestore.")
-        else:
-            # Setup default state if no document exists
-            global_state = {
-                'current_game_id': 0,
-                'current_numbers': [],
-                'is_game_active': False,
-                'last_game_time': time.time() - GAME_INTERVAL_SECONDS, # Allow instant start check
-                'last_call_time': time.time() - CALL_INTERVAL_SECONDS,
-                'active_players': {}, 
-                'total_prize_pool': 0.0
-            }
-            await save_global_state() 
-            logger.warning("Global state document not found. Created default state.")
-            
-    except Exception as e:
-        logger.error(f"Error loading global state from Firestore: {e}")
-        global_state = { 'is_game_active': False, 'current_game_id': 0, 'active_players': {}, 'total_prize_pool': 0.0, 'current_numbers': [] }
-
-
-async def save_global_state():
-    """Saves global game state to Firestore."""
-    if not db: return 
-    try:
-        doc_ref = db.collection('global_state').document('current')
-        await doc_ref.set(global_state)
-        logger.debug("Global state saved to Firestore.")
-    except Exception as e:
-        logger.error(f"Error saving global state to Firestore: {e}")
-
-
-async def get_user_data(user_id: int) -> dict:
-    """Retrieves or creates a user's data from Firestore."""
+def get_user_data(user_id: int) -> dict:
+    """Retrieves or creates user data from in-memory dictionary."""
     user_id_str = str(user_id)
-    
-    if not db: 
-        logger.warning(f"DB not initialized. Returning dummy data for user {user_id}.")
-        return { 'user_id': user_id, 'balance': 0.0, 'cards': {}, 'registration_time': time.time() }
-
-    doc_ref = db.collection('users').document(user_id_str)
-    
-    try:
-        doc = await doc_ref.get()
-        if doc.exists:
-            return doc.to_dict()
-        else:
-            default_data = {
-                'user_id': user_id,
-                'balance': INITIAL_BALANCE,
-                'cards': {}, 
-                'registration_time': time.time()
-            }
-            await doc_ref.set(default_data)
-            logger.info(f"New user {user_id} registered in Firestore.")
-            return default_data
-    except Exception as e:
-        logger.error(f"Error retrieving or creating user {user_id}: {e}")
-        return {
-            'user_id': user_id, 'balance': 0.0, 'cards': {}, 'registration_time': time.time()
+    if user_id_str not in user_data_db:
+        user_data_db[user_id_str] = {
+            'user_id': user_id,
+            'balance': INITIAL_BALANCE,
+            'cards': {}, 
+            'registration_time': time.time()
         }
+    return user_data_db[user_id_str]
 
+def save_user_data(user_data: dict):
+    """Saves user data back to the in-memory dictionary (no file I/O)."""
+    user_data_db[str(user_data['user_id'])] = user_data
 
-async def save_user_data(user_data: dict) -> bool:
-    """Saves a user's data to Firestore."""
-    if not db: return False 
-    user_id_str = str(user_data['user_id'])
-    doc_ref = db.collection('users').document(user_id_str)
-    
-    try:
-        await doc_ref.set(user_data)
-        logger.debug(f"User data for {user_data['user_id']} saved to Firestore.")
-        return True
-    except Exception as e:
-        logger.error(f"Error saving user {user_id_str}: {e}")
-        return False
 
 # ==============================================================================
 # ----------------------------- BINGO GAME LOGIC -------------------------------
@@ -184,11 +77,8 @@ def generate_bingo_card():
     
     card['B'] = random.sample(range(1, 16), 5)
     card['I'] = random.sample(range(16, 31), 5)
-    
-    # N column (31-45) - Middle spot is the Free Space (0)
     N_samples = random.sample(range(31, 46), 4)
-    card['N'] = [N_samples[0], N_samples[1], 0, N_samples[2], N_samples[3]]
-    
+    card['N'] = [N_samples[0], N_samples[1], 0, N_samples[2], N_samples[3]] # 0 is Free Space
     card['G'] = random.sample(range(46, 61), 5)
     card['O'] = random.sample(range(61, 76), 5)
     
@@ -205,22 +95,16 @@ def check_for_bingo(card_matrix, called_numbers):
     def is_covered(number):
         return number == 0 or number in called_numbers
 
-    # 1. Check Rows
-    for row in card_matrix:
-        if all(is_covered(num) for num in row):
-            return True
+    # Check Rows, Columns, and Diagonals
+    for i in range(5):
+        # Rows
+        if all(is_covered(card_matrix[i][j]) for j in range(5)): return True
+        # Columns
+        if all(is_covered(card_matrix[j][i]) for j in range(5)): return True
 
-    # 2. Check Columns
-    for col in range(5):
-        if all(is_covered(card_matrix[row][col]) for row in range(5)):
-            return True
-
-    # 3. Check Diagonals (Main and Anti-Diagonal)
-    if all(is_covered(card_matrix[i][i]) for i in range(5)):
-        return True
-
-    if all(is_covered(card_matrix[i][4 - i]) for i in range(5)):
-        return True
+    # Diagonals
+    if all(is_covered(card_matrix[i][i]) for i in range(5)): return True
+    if all(is_covered(card_matrix[i][4 - i]) for i in range(5)): return True
 
     return False
 
@@ -255,7 +139,7 @@ def format_card(card_matrix, called_numbers):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and registers the user."""
     user = update.effective_user
-    user_data = await get_user_data(user.id) 
+    user_data = get_user_data(user.id) 
     
     await update.message.reply_html(
         rf"ሰላም, {user.mention_html()}! እንኳን ወደ Addis Bingo Bot በደህና መጡ።"
@@ -268,7 +152,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shows the user's current balance."""
     user = update.effective_user
-    user_data = await get_user_data(user.id) 
+    user_data = get_user_data(user.id) 
     
     await update.message.reply_text(
         f"የርስዎ ባላንስ: **{user_data['balance']:.2f} ብር**",
@@ -373,7 +257,7 @@ async def deposit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def buycard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Allows a user to buy a new bingo card."""
     user = update.effective_user
-    user_data = await get_user_data(user.id) 
+    user_data = get_user_data(user.id) 
     
     if user_data['balance'] < GAME_PRICE:
         await update.message.reply_text(
@@ -402,8 +286,8 @@ async def buycard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     global_state['active_players'][str(user.id)] = current_game_id
     global_state['total_prize_pool'] += GAME_PRICE
 
-    await save_user_data(user_data)
-    await save_global_state()
+    save_user_data(user_data) # Saves to memory
+    # No need to save global state if we are non-persistent.
 
     await update.message.reply_text(
         f"በስኬት አዲስ የቢንጎ ካርድ ገዝተዋል! (Game #{current_game_id})\n"
@@ -419,7 +303,7 @@ async def buycard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def showcards_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shows all active bingo cards for the current game."""
     user = update.effective_user
-    user_data = await get_user_data(user.id) 
+    user_data = get_user_data(user.id) 
     
     current_game_id = global_state.get('current_game_id', 0)
     game_id_str = str(current_game_id)
@@ -458,7 +342,7 @@ async def bingo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("ለዚህ ዙር ጨዋታ ንቁ ካርድ የለዎትም።")
         return
         
-    user_data = await get_user_data(user.id) 
+    user_data = get_user_data(user.id) 
     current_game_id = global_state.get('current_game_id', 0)
     game_id_str = str(current_game_id)
     
@@ -479,16 +363,21 @@ async def bingo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         win_amount = prize_pool
         
         user_data['balance'] += win_amount
-        await save_user_data(user_data) 
+        save_user_data(user_data) 
 
+        # Reset global state for the next game
         global_state['is_game_active'] = False
         global_state['last_game_time'] = time.time()
         global_state['current_numbers'] = []
         global_state['active_players'] = {}
         global_state['total_prize_pool'] = 0.0
         
-        await save_global_state() 
-
+        # Remove the job queue task for number calling
+        job_name = f"call_numbers_{current_game_id}"
+        current_jobs = context.job_queue.get_jobs_by_name(job_name)
+        for job in current_jobs:
+             job.schedule_removal()
+        
         winner_message = (
             f"🎉🎉🎉 **BINGO! BINGO! BINGO!** 🎉🎉🎉\n"
             f"አሸናፊ: **{user.full_name}**\n"
@@ -523,13 +412,13 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     target_user_id = int(data[1])
     
     try:
-        user_data = await get_user_data(target_user_id) 
+        user_data = get_user_data(target_user_id) 
         
         if action == 'approve':
             amount = float(data[2])
             
             user_data['balance'] += amount
-            await save_user_data(user_data) 
+            save_user_data(user_data) 
             
             await query.edit_message_text(
                 query.message.text + f"\n\n✅ **APPROVED** by Admin.\nNew Balance: {user_data['balance']:.2f} ብር"
@@ -576,12 +465,11 @@ async def check_and_start_game(context: ContextTypes.DEFAULT_TYPE) -> None:
     active_players_count = len(global_state.get('active_players', {}))
 
     if active_players_count >= MIN_PLAYERS:
+        # Start a new game
         global_state['current_game_id'] += 1
         global_state['is_game_active'] = True
         global_state['current_numbers'] = []
         global_state['last_call_time'] = time.time() 
-        
-        await save_global_state() 
         
         start_message = (
             f"🔔🔔🔔 **NEW BINGO GAME STARTED!** (Game #{global_state['current_game_id']})\n"
@@ -595,6 +483,7 @@ async def check_and_start_game(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as e:
                 logger.warning(f"Failed to send start message to user {user_id}: {e}")
         
+        # Schedule the number calling task
         context.job_queue.run_repeating(
             call_number_task, 
             interval=CALL_INTERVAL_SECONDS,
@@ -613,6 +502,7 @@ async def call_number_task(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if len(global_state['current_numbers']) >= 75:
+        # End game if all numbers are called and no one won
         global_state['is_game_active'] = False
         global_state['last_game_time'] = time.time()
         global_state['current_numbers'] = []
@@ -626,7 +516,6 @@ async def call_number_task(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 pass
                 
-        await save_global_state() 
         context.job.schedule_removal()
         return
 
@@ -639,8 +528,6 @@ async def call_number_task(context: ContextTypes.DEFAULT_TYPE) -> None:
     new_number = random.choice(available_numbers)
     global_state['current_numbers'].append(new_number)
     global_state['last_call_time'] = time.time() 
-    
-    await save_global_state() 
 
     column = next(c for n, c in [(1, "B"), (16, "I"), (31, "N"), (46, "G"), (61, "O")] if new_number >= n and new_number <= n + 14)
 
@@ -664,16 +551,8 @@ async def call_number_task(context: ContextTypes.DEFAULT_TYPE) -> None:
 # ==============================================================================
 
 async def post_init(application: Application):
-    """Initializes DB and loads state after bot initialization."""
+    """Setup initial tasks and webhook after application object is created."""
     
-    try:
-        initialize_firebase() # <--- FIREBASE IS NOW RE-ENABLED
-    except Exception:
-        logger.critical("Bot cannot run without Firebase Initialization. Shutting down.")
-        raise 
-
-    await load_global_state() 
-        
     application.job_queue.run_repeating(
         lambda context: check_and_start_game(context), 
         interval=60, 
@@ -684,6 +563,7 @@ async def post_init(application: Application):
     
     if RENDER_URL == "YOUR_RENDER_URL_HERE":
         logger.critical("FATAL: RENDER_EXTERNAL_URL is not set correctly. Bot cannot set webhook.")
+        # We raise the error here to ensure the bot fails fast if ENV is bad
         raise ValueError("RENDER_EXTERNAL_URL is not set.")
         
     await application.bot.set_webhook(url=f"{RENDER_URL}{WEBHOOK_PATH}")
@@ -712,7 +592,8 @@ def main() -> None:
     # Admin handlers
     application.add_handler(CallbackQueryHandler(admin_callback_handler))
 
-    # Start the Webhook Bot. This call is blocking and handles the event loop correctly.
+    # CRITICAL FIX: application.run_webhook is a blocking call that handles 
+    # the event loop itself, which avoids the RuntimeError conflict.
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
@@ -722,6 +603,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # CRITICAL FIX: We are no longer using asyncio.run(main()) which caused the conflict.
-    # The application.run_webhook() call inside main() now handles the loop itself.
+    # We call main() directly. The application.run_webhook inside handles the loop.
     main()
